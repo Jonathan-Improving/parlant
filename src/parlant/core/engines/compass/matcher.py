@@ -126,6 +126,7 @@ class Matcher:
         await self._record(context, matches, append=True)
 
     def _get_strategy(self, context: EngineContext, guideline: Guideline) -> MatcherStrategy:
+        return MatcherStrategy.RANK  # FIXME
         strategy = MatcherStrategy.RECALL
 
         match context.agent.effort:
