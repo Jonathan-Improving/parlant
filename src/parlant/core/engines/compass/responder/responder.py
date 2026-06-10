@@ -20,7 +20,8 @@ from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
 from parlant.core.engines.alpha.guideline_matching.generic.common import internal_representation
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.engines.compass.loop.loop import LoopJob
+from parlant.core.engines.compass.loop.loop import Loop, LoopJob
+from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
 from parlant.core.engines.compass.loop.streaming_loop import StreamingLoop
 from parlant.core.loggers import Logger
 from parlant.core.meter import Meter
@@ -36,11 +37,13 @@ class Responder:
         tracer: Tracer,
         meter: Meter,
         streaming_loop: StreamingLoop,
+        blocking_loop: BlockingLoop,
     ) -> None:
         self._logger = logger
         self._tracer = tracer
         self._meter = meter
         self._streaming_loop = streaming_loop
+        self._blocking_loop = blocking_loop
 
     def _build_job(
         self,
@@ -55,12 +58,21 @@ class Responder:
             reasoning_config=self._get_reasoning_config(context),
         )
 
+    def _loop_for(self, context: EngineContext) -> Loop:
+        """Pick the generation loop by the agent's message output mode: streamed
+        (incremental, chunked) or blocked (whole message emitted at once)."""
+        match context.agent.message_output_mode:
+            case MessageOutputMode.STREAM:
+                return self._streaming_loop
+            case MessageOutputMode.BLOCK:
+                return self._blocking_loop
+
     async def prefill(self, context: EngineContext) -> None:
         # Warm the provider cache for the stable prefix. The job itself is not
         # retained — respond() rebuilds an equivalent one and reads the warm
         # (content-addressed) cache. Prefill skips the turn instructions, so no
         # rematch callback is needed here.
-        await self._streaming_loop.prefill(self._build_job(context))
+        await self._loop_for(context).prefill(self._build_job(context))
 
     async def respond(
         self,
@@ -68,15 +80,11 @@ class Responder:
         refresh_state: Callable[[EngineContext], Awaitable[None]],
     ) -> None:
         composition_mode = await self._resolve_composition_mode(context)
-        output_mode = context.agent.message_output_mode
 
-        if (
-            output_mode == MessageOutputMode.STREAM
-            and composition_mode == CompositionMode.CANNED_FLUID
-        ):
-            await self._streaming_loop.run(self._build_job(context, refresh_state))
+        if composition_mode == CompositionMode.CANNED_FLUID:
+            await self._loop_for(context).run(self._build_job(context, refresh_state))
         else:
-            raise Exception(f"Unsupported message output mode: {output_mode}")
+            raise Exception(f"Unsupported composition mode: {composition_mode}")
 
     async def _resolve_composition_mode(self, context: EngineContext) -> CompositionMode:
         """Resolve effective composition mode from matched guidelines.
