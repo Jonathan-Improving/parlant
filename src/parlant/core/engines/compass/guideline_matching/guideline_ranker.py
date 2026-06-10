@@ -265,7 +265,9 @@ class GuidelineRanker:
 """,
             props={
                 "guideline_text": _format_guideline(
-                    guideline.content.condition, guideline.content.action
+                    guideline.content.condition,
+                    guideline.content.action,
+                    guideline.content.description,
                 ),
             },
             status=SectionStatus.ACTIVE,
@@ -403,12 +405,14 @@ def _aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInf
     )
 
 
-def _format_guideline(condition: str, action: str | None) -> str:
+def _format_guideline(condition: str, action: str | None, description: str | None = None) -> str:
     # The action is optional and only present to contextualize the condition; omit
     # it entirely when absent rather than rendering "Action: None".
     text = f"Condition: {condition}."
     if action:
         text += f" Action: {action}"
+    if description:
+        text += f" Detailed Instructions: {description}"
     return text
 
 
