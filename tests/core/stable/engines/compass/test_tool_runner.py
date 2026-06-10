@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, cast
+
+import pytest
 
 from parlant.core.common import JSONSerializable
 from parlant.core.engines.engine_context import EngineContext
@@ -82,3 +85,23 @@ async def test_that_run_tool_captures_a_failure_as_an_error_result() -> None:
 
     assert "error_details" in result.metadata
     assert "kaboom" in result.metadata["error_details"]
+
+
+class _HangingService:
+    async def call_tool(
+        self, name: str, context: ToolContext, arguments: Mapping[str, Any]
+    ) -> ToolResult:
+        await asyncio.sleep(5)
+        return ToolResult(data="done")
+
+
+async def test_that_run_tool_times_out_and_returns_an_error_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PARLANT_TOOL_TIMEOUT", "0.05")
+    runner = _runner(cast(_FakeService, _HangingService()))
+
+    result = await runner.run_tool(_engine_context(), ToolId("svc", "slow"), {})
+
+    assert "error_details" in result.metadata
+    assert "timed out" in result.metadata["error_details"]
