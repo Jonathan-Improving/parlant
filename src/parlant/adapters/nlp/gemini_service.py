@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 import cachetools
 from google.api_core.exceptions import NotFound, TooManyRequests, ResourceExhausted, ServerError
-from google.genai.errors import ClientError
+from google.genai.errors import APIError, ClientError, ServerError as GenaiServerError
 import google.genai  # type: ignore
 import google.genai.types  # type: ignore
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
@@ -219,7 +219,9 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                     ResourceExhausted,
                 )
             ),
-            retry(ServerError, max_exceptions=2, wait_times=(1.0, 5.0)),
+            # Both google.api_core's ServerError and the google-genai SDK's own
+            # (distinct) ServerError, so 5xx (e.g. 503) is retried either way.
+            retry((ServerError, GenaiServerError), max_exceptions=3, wait_times=(1.0, 5.0, 10.0)),
         ]
     )
     @override
@@ -1233,6 +1235,14 @@ class GeminiReactGenerator(ReactGenerator):
             # Transient — mirror the schematic generator's retry set. The consumer
             # (BaseLoop) retries these before any event of the step is emitted.
             raise ReactError(str(exc), retryable=True) from exc
+        except APIError as exc:
+            # The google-genai SDK raises its OWN ClientError/ServerError (distinct
+            # from google.api_core's — not subclasses), so the above never catch
+            # them. Retry transient HTTP statuses (rate limit + 5xx, e.g. 503);
+            # let other 4xx (bad request, auth) propagate unretried.
+            if exc.code in (429, 500, 502, 503, 504):
+                raise ReactError(str(exc), retryable=True) from exc
+            raise
 
     # ---- explicit caching --------------------------------------------------
 
