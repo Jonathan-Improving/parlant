@@ -143,6 +143,8 @@ Your role is to generate a reply message to the current (latest) state of the in
 
 Later in this prompt, you'll be provided with behavioral guidelines and other contextual information you must take into account when generating your response.
 
+Unless stated otherwise in guidelines or by the user, always respond to the user in the same language they used in their last message.
+
 """,
             props={},
         )
