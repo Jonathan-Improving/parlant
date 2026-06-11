@@ -16,7 +16,7 @@ from typing import Any, cast
 
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha.hooks import EngineHooks
-from parlant.core.engines.compass.loop.base_loop import _LoopState
+from parlant.core.engines.compass.loop.base_loop import _LoopState, _PROVIDER_DATA_KEY
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.loggers import StdoutLogger
@@ -28,9 +28,10 @@ from parlant.core.nlp.react import (
     StepResult,
     TextDelta,
     TextPart,
+    ToolResultPart,
     Usage,
 )
-from parlant.core.sessions import EventKind, EventSource
+from parlant.core.sessions import EventKind, EventSource, ToolEventData
 from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
@@ -51,6 +52,41 @@ def _make_blocking_loop() -> BlockingLoop:
         tool_runner=cast(Any, None),
         hooks=EngineHooks(),
     )
+
+
+class _NoReplayReact:
+    """Stands in for a generator that can't natively replay a stored tool turn
+    (e.g. Gemini when the persisted thought_signature is unusable)."""
+
+    def deserialize_tool_messages(self, deserializer: Any) -> None:
+        return None
+
+
+def test_that_an_unreplayable_tool_event_is_rendered_as_a_result_not_dropped() -> None:
+    # A prior-turn tool event whose provider blob can't be natively replayed must
+    # NOT be discarded — that would make the model forget the tool's data across
+    # turns. Fall back to a result-only rendering so the data survives.
+    loop = _make_blocking_loop()
+    loop._react = cast(Any, _NoReplayReact())
+
+    data: ToolEventData = {
+        "tool_calls": [
+            {
+                "tool_id": "get_order_details",
+                "rationale": "",
+                "arguments": {"order_id": "#W2378156"},
+                "result": cast(Any, {"data": {"status": "delivered"}, "metadata": {}}),
+            }
+        ]
+    }
+    metadata = {_PROVIDER_DATA_KEY: {"provider": "gemini", "model": "stale-model"}}
+
+    messages = loop._build_tool_event_messages(data, metadata, "sess.compass")
+
+    assert len(messages) == 1
+    assert messages[0].role == Role.TOOL
+    result_part = cast(ToolResultPart, messages[0].parts[0])
+    assert result_part.content == {"status": "delivered"}
 
 
 async def test_that_blocking_loop_emits_a_single_complete_message_event_without_chunks() -> None:

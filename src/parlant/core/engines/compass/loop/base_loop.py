@@ -158,7 +158,7 @@ class BaseLoop(Loop):
         )
 
         if usage.input_tokens > 0:
-            self._logger.info(f"{self.__class__.__name__} prefill usage:\n {usage}")
+            self._logger.debug(f"{self.__class__.__name__} prefill usage:\n {usage}")
 
         return usage
 
@@ -236,10 +236,10 @@ class BaseLoop(Loop):
             state.steps.append(event.result)
 
             if event.result.message.reasoning:
-                self._logger.info(
+                self._logger.trace(
                     f"{self.__class__.__name__} step reasoning:\n {event.result.message.reasoning}"
                 )
-            self._logger.info(f"{self.__class__.__name__} step usage:\n {event.result.usage}")
+            self._logger.debug(f"{self.__class__.__name__} step usage:\n {event.result.usage}")
 
     async def _update_reasoning(self, context: EngineContext, state: _LoopState) -> None:
         match state.current_event:
@@ -626,12 +626,16 @@ class BaseLoop(Loop):
                 SessionToolMessageDeserializer(data, provider_data)
             )
             if messages is None:
-                self._logger.warning(
-                    "Skipping a tool event while building history: its provider data "
-                    f"({provider_data.get('provider')}/{provider_data.get('model')}) "
-                    "can't be replayed by the current generator."
+                # The current generator can't natively replay this blob (e.g. a
+                # Gemini tool call whose stored thought_signature is unusable).
+                # Degrade — don't drop: render the result so the model still sees
+                # the tool's data across turns, rather than forgetting it entirely.
+                self._logger.debug(
+                    "Can't natively replay a tool event while building history "
+                    f"({provider_data.get('provider')}/{provider_data.get('model')}); "
+                    "falling back to a result-only rendering."
                 )
-                return []
+                return self._legacy_tool_event_messages(data, cache_key)
             for message in messages:
                 message.cache_key = cache_key
             return list(messages)
