@@ -20,7 +20,12 @@ from typing import Sequence
 
 from parlant.core.agents import Effort
 from parlant.core.common import DefaultBaseModel, JSONSerializable
-from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
+from parlant.core.engines.alpha.prompt_builder import (
+    BuiltInSection,
+    EventAdaptationFormat,
+    PromptBuilder,
+    SectionStatus,
+)
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.loggers import Logger
@@ -124,7 +129,7 @@ class GuidelineRanker:
             prompt=prompt,
             hints={
                 "reasoning_effort": self._get_reasoning_effort(context),
-                "cache": {"action": "load", "key": context.session.id},
+                "cache": {"action": "load", "key": self._cache_key(context)},
             },
         )
 
@@ -143,6 +148,12 @@ class GuidelineRanker:
             inference.info,
         )
 
+    def _cache_key(self, context: EngineContext) -> str:
+        # Namespace the provider cache per session AND component, so components that
+        # cache concurrently (e.g. within a matching batch) never clobber a shared
+        # session-keyed entry. store (prefill) and load (rank) must use the same key.
+        return f"{context.session.id}.guideline-ranker"
+
     def _get_reasoning_effort(self, context: EngineContext) -> str:
         match context.agent.effort:
             case Effort.MIN:
@@ -156,7 +167,7 @@ class GuidelineRanker:
             case Effort.MAX:
                 return "medium"
 
-    async def prefill(self, context: EngineContext) -> None:
+    async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the ranker's shared prompt prefix.
 
         `rank` fans out one request per guideline concurrently, each repeating the
@@ -174,15 +185,13 @@ class GuidelineRanker:
                     prompt=prompt,
                     hints={
                         "reasoning_effort": self._get_reasoning_effort(context),
-                        "cache": {"action": "store", "key": context.session.id},
+                        "cache": {"action": "store", "key": self._cache_key(context)},
                     },
                 )
-                if inference.info.usage.input_tokens > 0:
-                    self._logger.info(
-                        f"{self.__class__.__name__} prefill usage:\n {inference.info}"
-                    )
+                return inference.info
             except Exception as exc:
                 self._logger.warning(f"Guideline ranker prefill failed (continuing): {exc}")
+                return None
 
     async def shots(self) -> Sequence[GuidelineRankingShot]:
         return await shot_collection.list()
@@ -248,12 +257,6 @@ class GuidelineRanker:
         # fan-out, so everything before it stays byte-identical within a turn.
         builder = self._build_shared_prompt(context, shots)
 
-        # Turn-varying context: changes turn to turn, so it's deliberately NOT in
-        # the shared prefix `prefill` warms (it would only bust that warm).
-        builder.add_context_variables(context.state.context_variables)
-        builder.add_glossary(list(context.state.glossary_terms))
-        builder.add_capabilities_for_guideline_matching(context.state.capabilities)
-        builder.add_interaction_history(context.interaction.events)
         builder.add_staged_tool_events(context.state.tool_events)
 
         builder.add_section(
@@ -364,6 +367,14 @@ OUTPUT FORMAT
                 "result_structure_text": self._format_output(),
                 "json_only_note": json_only_note,
             },
+        )
+
+        builder.add_context_variables(context.state.context_variables)
+        builder.add_glossary(list(context.state.glossary_terms))
+        builder.add_capabilities_for_guideline_matching(context.state.capabilities)
+        builder.add_interaction_history(
+            context.interaction.events,
+            format=EventAdaptationFormat.ROLE_SCRIPT,
         )
 
         return builder

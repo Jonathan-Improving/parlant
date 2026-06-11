@@ -92,6 +92,14 @@ class PromptSection:
     status: Optional[SectionStatus]
 
 
+class EventAdaptationFormat(Enum):
+    JSON = auto()
+    """The event is adapted into a JSON-serializable dict, and then dumped into the prompt as a JSON string"""
+
+    ROLE_SCRIPT = auto()
+    """The event is adapted into a script-like format, e.g. for messages: `"{participant}: {message}"`"""
+
+
 class PromptBuilder:
     def __init__(self, on_build: Optional[Callable[[str], None]] = None) -> None:
         self.sections: dict[str | BuiltInSection, PromptSection] = {}
@@ -202,21 +210,24 @@ class PromptBuilder:
             return SectionStatus.NONE
 
     @staticmethod
-    def adapt_event(e: Event | EmittedEvent) -> str:
-        data = e.data
+    def adapt_event(
+        e: Event | EmittedEvent,
+        format: EventAdaptationFormat = EventAdaptationFormat.JSON,
+    ) -> str:
+        adapted_data: dict[str, str] = {}
 
         if e.kind == EventKind.MESSAGE:
             message_data = cast(MessageEventData, e.data)
 
             if message_data.get("flagged"):
-                data = {
+                adapted_data = {
                     "participant": message_data["participant"]["display_name"],
                     "message": "<N/A>",
-                    "censored": True,
-                    "reasons": message_data["tags"],
+                    "censored": "Yes",
+                    "reasons": str(message_data["tags"]),
                 }
             else:
-                data = {
+                adapted_data = {
                     "participant": message_data["participant"]["display_name"],
                     "message": message_data["message"],
                 }
@@ -224,33 +235,55 @@ class PromptBuilder:
         if e.kind == EventKind.TOOL:
             tool_data = cast(ToolEventData, e.data)
 
-            data = {
-                "tool_calls": [
-                    {
-                        "tool_id": tc["tool_id"],
-                        "arguments": tc["arguments"],
-                        "result": tc["result"]["data"],
-                    }
-                    for tc in tool_data["tool_calls"]
-                ]
+            adapted_data = {
+                "tool_calls": str(
+                    [
+                        {
+                            "tool_id": tc["tool_id"],
+                            "arguments": tc["arguments"],
+                            "result": tc["result"]["data"],
+                        }
+                        for tc in tool_data["tool_calls"]
+                    ]
+                )
             }
 
-        source_map: dict[EventSource, str] = {
-            EventSource.CUSTOMER: "user",
-            EventSource.CUSTOMER_UI: "frontend_application",
-            EventSource.HUMAN_AGENT: "human_service_agent",
-            EventSource.HUMAN_AGENT_ON_BEHALF_OF_AI_AGENT: "ai_agent",
-            EventSource.AI_AGENT: "ai_agent",
-            EventSource.SYSTEM: "system-provided",
-        }
-
-        return json.dumps(
-            {
-                "event_kind": e.kind.value,
-                "event_source": source_map[e.source],
-                "data": data,
+        if format == EventAdaptationFormat.JSON:
+            source_map: dict[EventSource, str] = {
+                EventSource.CUSTOMER: "user",
+                EventSource.CUSTOMER_UI: "frontend_application",
+                EventSource.HUMAN_AGENT: "human_service_agent",
+                EventSource.HUMAN_AGENT_ON_BEHALF_OF_AI_AGENT: "ai_agent",
+                EventSource.AI_AGENT: "ai_agent",
+                EventSource.SYSTEM: "system-provided",
             }
-        )
+
+            return json.dumps(
+                {
+                    "event_kind": e.kind.value,
+                    "event_source": source_map[e.source],
+                    "data": adapted_data,
+                }
+            )
+        else:
+            if e.kind == EventKind.TOOL:
+                return f"Tool Calls: {adapted_data['tool_calls']}"
+
+            source_map = {
+                EventSource.CUSTOMER: f"User ({adapted_data['participant']})",
+                EventSource.CUSTOMER_UI: "User (Sent via Frontend App)",
+                EventSource.HUMAN_AGENT: f"Human Representative ({adapted_data['participant']})",
+                EventSource.HUMAN_AGENT_ON_BEHALF_OF_AI_AGENT: "Agent",
+                EventSource.AI_AGENT: "Agent",
+                EventSource.SYSTEM: "System",
+            }
+
+            if e.kind == EventKind.MESSAGE:
+                return f"{source_map[e.source]}: {adapted_data['message']}"
+            elif e.kind == EventKind.CUSTOM:
+                return f"{source_map[e.source]}: {e.data}"
+            else:
+                raise ValueError(f"Unsupported event kind for adaptation: {e.kind}")
 
     def add_agent_identity(
         self,
@@ -310,9 +343,10 @@ Proceed with your task accordingly.
         self,
         events: Sequence[Event],
         staged_events: Sequence[EmittedEvent],
+        format: EventAdaptationFormat,
     ) -> list[str]:
         combined = list(events) + list(staged_events)
-        return [self.adapt_event(e) for e in combined if e.kind != EventKind.STATUS]
+        return [self.adapt_event(e, format=format) for e in combined if e.kind != EventKind.STATUS]
 
     def _last_agent_message_note(
         self,
@@ -334,7 +368,7 @@ Proceed with your task accordingly.
         last_event_note: str | None = None,
     ) -> None:
         template = self._INTERACTION_BODY
-        props: dict[str, Any] = {"interaction_events": interaction_events}
+        props: dict[str, Any] = {"interaction_events": "\n".join(interaction_events)}
 
         if last_event_note:
             template += "{last_event_note}\n"
@@ -358,9 +392,10 @@ Proceed with your task accordingly.
         self,
         events: Sequence[Event],
         staged_events: Sequence[EmittedEvent] = [],
+        format: EventAdaptationFormat = EventAdaptationFormat.JSON,
     ) -> PromptBuilder:
         if events:
-            interaction_events = self._gather_interaction_events(events, staged_events)
+            interaction_events = self._gather_interaction_events(events, staged_events, format)
             self._add_history_section(interaction_events=interaction_events)
         else:
             self._add_empty_history_section()
@@ -371,9 +406,10 @@ Proceed with your task accordingly.
         self,
         events: Sequence[Event],
         staged_events: Sequence[EmittedEvent] = [],
+        format: EventAdaptationFormat = EventAdaptationFormat.JSON,
     ) -> PromptBuilder:
         if events:
-            interaction_events = self._gather_interaction_events(events, staged_events)
+            interaction_events = self._gather_interaction_events(events, staged_events, format)
             last_event_note = self._last_agent_message_note(events)
             self._add_history_section(
                 interaction_events=interaction_events, last_event_note=last_event_note
