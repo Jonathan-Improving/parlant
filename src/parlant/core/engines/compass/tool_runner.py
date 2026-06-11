@@ -63,6 +63,10 @@ class ToolRunner:
                 timeout=timeout,
             )
 
+            self._logger.debug(
+                f"Tool {tool.to_string()} completed with result {json.dumps(result.data, indent=2)}"
+            )
+
             return result
         except asyncio.TimeoutError:
             self._logger.error(f"Tool call timed out after {timeout}s ({tool.to_string()})")
