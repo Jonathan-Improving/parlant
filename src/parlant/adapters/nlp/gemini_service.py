@@ -66,6 +66,7 @@ from parlant.core.nlp.react import (
     CacheConfig,
     FinishReason,
     Message,
+    ReactError,
     ReactGenerator,
     ReactGeneratorHints,
     ReasoningConfig,
@@ -1210,10 +1211,6 @@ class GeminiReactGenerator(ReactGenerator):
 
         config = google.genai.types.GenerateContentConfig(**config_kwargs)
 
-        self._logger.debug(
-            f"Sending request to Gemini: model={request['model']}. Contents:{contents} "
-        )
-
         try:
             stream = await self._client.aio.models.generate_content_stream(
                 model=request["model"],
@@ -1229,9 +1226,13 @@ class GeminiReactGenerator(ReactGenerator):
                 aclose = getattr(stream, "aclose", None)
                 if aclose is not None:
                     await aclose()
-        except TooManyRequests:
+        except TooManyRequests as exc:
             self._logger.error(RATE_LIMIT_ERROR_MESSAGE)
-            raise
+            raise ReactError(str(exc), retryable=True) from exc
+        except (NotFound, ResourceExhausted, ServerError) as exc:
+            # Transient — mirror the schematic generator's retry set. The consumer
+            # (BaseLoop) retries these before any event of the step is emitted.
+            raise ReactError(str(exc), retryable=True) from exc
 
     # ---- explicit caching --------------------------------------------------
 

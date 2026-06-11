@@ -87,6 +87,7 @@ from parlant.core.nlp.react import (
     CacheConfig,
     FinishReason,
     Message,
+    ReactError,
     ReactGenerator,
     ReactGeneratorHints,
     ReasoningConfig,
@@ -1131,9 +1132,19 @@ class OpenAIReactGenerator(ReactGenerator):
             async with stream:
                 async for event in stream:
                     yield event
-        except RateLimitError:
+        except RateLimitError as exc:
             self._logger.error(RATE_LIMIT_ERROR_MESSAGE)
-            raise
+            raise ReactError(str(exc), retryable=True) from exc
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            ConflictError,
+            APIResponseValidationError,
+            InternalServerError,
+        ) as exc:
+            # Transient — mirror the schematic generator's retry set. The consumer
+            # (BaseLoop) retries these before any event of the step is emitted.
+            raise ReactError(str(exc), retryable=True) from exc
 
     def _build_prefill_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """Turn an encoded request into a cache-warming request: same input

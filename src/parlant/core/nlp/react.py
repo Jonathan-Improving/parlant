@@ -105,6 +105,17 @@ class ReactGeneratorHints(TypedDict, total=False):
     service_tier: NotRequired[ServiceTier]
 
 
+class ReactError(Exception):
+    """An error raised by a ReactGenerator while running a step. ``retryable``
+    marks transient provider failures (rate limits, connection/server errors) the
+    caller may safely retry — but only before any event of the step has been
+    emitted, since a stream can't be replayed mid-flight."""
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 # ───────────────────────────── canonical message model ─────────────────────
 
 

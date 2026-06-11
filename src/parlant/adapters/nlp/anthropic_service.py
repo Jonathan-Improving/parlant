@@ -68,6 +68,7 @@ from parlant.core.nlp.react import (
     CacheConfig,
     FinishReason,
     Message,
+    ReactError,
     ReactGenerator,
     ReactGeneratorHints,
     ReasoningConfig,
@@ -856,9 +857,18 @@ class AnthropicReactGenerator(ReactGenerator):
                 async for event in stream:
                     yield event
                 yield _AnthropicFinal(await stream.get_final_message())
-        except RateLimitError:
+        except RateLimitError as exc:
             self._logger.error(ANTHROPIC_RATE_LIMIT_ERROR_MESSAGE)
-            raise
+            raise ReactError(str(exc), retryable=True) from exc
+        except (
+            APIConnectionError,
+            APITimeoutError,
+            APIResponseValidationError,
+            InternalServerError,
+        ) as exc:
+            # Transient — mirror the schematic generator's retry set. The consumer
+            # (BaseLoop) retries these before any event of the step is emitted.
+            raise ReactError(str(exc), retryable=True) from exc
 
     def _build_prefill_request(self, request: dict[str, Any]) -> dict[str, Any]:
         """Turn an encoded request into a cache-warming request: same cached

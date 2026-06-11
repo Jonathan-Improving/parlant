@@ -28,6 +28,7 @@ from parlant.core.engines.compass.loop.loop import Loop, LoopJob, LoopResult
 from parlant.core.nlp.common import ModelSize
 from parlant.core.nlp.react import (
     Message,
+    ReactError,
     ReasoningDelta,
     Role,
     StepCompleted,
@@ -141,6 +142,10 @@ class BaseLoop(Loop):
     everything else (history building, reasoning/tool handling, the react loop) is
     output-mode-agnostic and lives here."""
 
+    # Retry a step on a transient ReactError, but only before any event has been
+    # emitted (a stream can't be replayed mid-flight). Waits between attempts.
+    _STREAM_RETRY_WAITS = (1.0, 4.0)
+
     async def prefill(self, job: LoopJob) -> Usage:
         self._logger.debug(f"Prefilling job for session {job.context.session.id}")
 
@@ -187,17 +192,7 @@ class BaseLoop(Loop):
                     refreshed, job.context.session.id
                 )
 
-            async for event in self._react.stream_step(
-                history=state.history,
-                tools=await self._get_tools(job.context),
-                tool_choice="auto",
-                reasoning=job.reasoning_config,
-                hints={"model_size": job.model_size},
-            ):
-                await self._on_new_event(state, event)
-                await self._update_reasoning(job.context, state)
-                await self._update_tool_calls(job.context, state)
-                await self._update_message(job.context, state)
+            await self._run_step(job, state)
 
             job.context.state.iterations.append(
                 IterationState(
@@ -224,6 +219,38 @@ class BaseLoop(Loop):
         await self._hooks.call_on_messages_emitted(job.context)
 
         return LoopResult(job=job, steps=state.steps)
+
+    async def _run_step(self, job: LoopJob, state: _LoopState) -> None:
+        """Run one react step, processing each event. A transient ReactError is
+        retried — but only while NO event has been produced yet: once events have
+        been emitted, the stream can't be replayed (it would re-emit chunks and
+        re-run side effects), so the error propagates. The transient errors we
+        retry are raised when the stream is opened, before any event."""
+        for attempt in range(len(self._STREAM_RETRY_WAITS) + 1):
+            produced = False
+            try:
+                async for event in self._react.stream_step(
+                    history=state.history,
+                    tools=await self._get_tools(job.context),
+                    tool_choice="auto",
+                    reasoning=job.reasoning_config,
+                    hints={"model_size": job.model_size},
+                ):
+                    produced = True
+                    await self._on_new_event(state, event)
+                    await self._update_reasoning(job.context, state)
+                    await self._update_tool_calls(job.context, state)
+                    await self._update_message(job.context, state)
+                return
+            except ReactError as exc:
+                if not exc.retryable or produced or attempt == len(self._STREAM_RETRY_WAITS):
+                    raise
+                wait = self._STREAM_RETRY_WAITS[attempt]
+                self._logger.warning(
+                    f"{self.__class__.__name__} retrying step after a transient error "
+                    f"({exc}); retrying in {wait}s (attempt {attempt + 2})."
+                )
+                await asyncio.sleep(wait)
 
     async def _get_tools(self, context: EngineContext) -> list[ToolSpec]:
         return [*tool_specs_from_tools(context.state.available_tools)]
@@ -548,7 +575,10 @@ class BaseLoop(Loop):
                         ],
                     )
                 )
-            elif event.kind == EventKind.TOOL and event.source == EventSource.SYSTEM:
+            elif event.kind == EventKind.TOOL:
+                # Reconstruct every tool event regardless of source (matching the
+                # alpha engine). Persisted tool events can carry source=AI_AGENT,
+                # so gating on SYSTEM silently dropped prior-turn tool results.
                 history.extend(
                     self._build_tool_event_messages(
                         cast(ToolEventData, event.data), event.metadata, cache_key
@@ -635,16 +665,21 @@ class BaseLoop(Loop):
                     f"({provider_data.get('provider')}/{provider_data.get('model')}); "
                     "falling back to a result-only rendering."
                 )
-                return self._legacy_tool_event_messages(data, cache_key)
+                return self._build_result_only_tool_event_messages(data, cache_key)
             for message in messages:
                 message.cache_key = cache_key
             return list(messages)
 
         # No provider blob (e.g. retriever-staged results, or events from before
         # this was introduced): fall back to the prior tool-result-only rendering.
-        return self._legacy_tool_event_messages(data, cache_key)
+        return self._build_result_only_tool_event_messages(data, cache_key)
 
-    def _legacy_tool_event_messages(self, data: ToolEventData, cache_key: str) -> list[Message]:
+    def _build_result_only_tool_event_messages(
+        self, data: ToolEventData, cache_key: str
+    ) -> list[Message]:
+        def build_content_with_args(call: ToolCall) -> str:
+            return f"{call['tool_id']}({', '.join(f'{k}={v}' for k, v in call['arguments'].items())}) returned: {call.get('result', {}).get('data', {})}"
+
         messages: list[Message] = []
 
         call_id = 0
@@ -660,7 +695,7 @@ class BaseLoop(Loop):
                         ToolResultPart(
                             call_id=str(call_id),
                             name=call["tool_id"],
-                            content=call["result"].get("data", {}),
+                            content=build_content_with_args(call),
                             is_error=is_error,
                         )
                     ],
