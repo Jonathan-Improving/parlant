@@ -39,7 +39,7 @@ from google.genai.errors import ClientError
 
 from parlant.adapters.nlp.gemini_service import (
     GEMINI_THOUGHT_SIGNATURE_KEY,
-    TURN_INSTRUCTIONS_OPEN,
+    TURN_INSTRUCTIONS_TOOL_NAME,
     Gemini_3_1_Flash_Lite,
     GeminiReactGenerator,
 )
@@ -245,12 +245,13 @@ async def test_that_a_prefix_above_the_cache_minimum_is_prefilled(
     assert await gemini._should_prefill(history, [], {}) is True
 
 
-def test_that_a_mid_conversation_system_message_rides_the_last_user_message(
+def test_that_a_mid_conversation_system_message_becomes_a_synthetic_tool_result(
     gemini: GeminiReactGenerator,
 ) -> None:
     # Gemini contents have no system role, and folding a mid-conversation system
-    # message into system_instruction would break caching — so it's appended
-    # (wrapped) to the END of the last user message instead.
+    # message into system_instruction would break caching. Appending it to the user
+    # message makes the model echo it, so instead it's delivered as the result of a
+    # synthetic get_instructions_for_next_turn tool — fetched data, not user input.
     history = [
         Message(role=Role.SYSTEM, parts=[TextPart(text="main")]),
         Message(role=Role.USER, parts=[TextPart(text="hi")]),
@@ -263,11 +264,15 @@ def test_that_a_mid_conversation_system_message_rides_the_last_user_message(
     assert request["system_instruction"].startswith("main")
     assert "ADDITIONAL RESPONSE CONSIDERATIONS" in request["system_instruction"]
     assert "mid" not in request["system_instruction"]
-    # The mid-conversation instruction rides, wrapped, at the end of the user turn.
-    assert [c.role for c in request["all_contents"]] == ["user"]
-    last_user = request["all_contents"][-1]
-    assert last_user.parts[-1].text.startswith(TURN_INSTRUCTIONS_OPEN)
-    assert "mid" in last_user.parts[-1].text
+
+    # The instruction rides as a trailing function-response turn (no functionCall:
+    # a synthetic one would be rejected for lacking a thought_signature).
+    contents = request["all_contents"]
+    assert [c.role for c in contents] == ["user", "user"]
+    assert all(p.function_call is None for c in contents for p in (c.parts or []))
+    function_response = contents[-1].parts[-1].function_response
+    assert function_response.name == TURN_INSTRUCTIONS_TOOL_NAME
+    assert function_response.response == {"instructions": "mid"}
 
 
 def test_that_encode_maps_effort_to_a_thinking_budget_on_gemini_25(logger: Logger) -> None:
@@ -559,6 +564,35 @@ async def test_that_store_registers_a_reusable_cache_entry_with_the_given_ttl(
     assert schematic._plan_load("s1", "HEAD " * 300 + "tail") == ("cachedContents/abc", "tail")
 
 
+async def test_that_overwriting_a_cache_key_does_not_delete_the_prior_resource(
+    schematic: Gemini_3_1_Flash_Lite[_CacheProbe],
+) -> None:
+    # Deleting the prior cache on overwrite would 403 a concurrent load still using
+    # it; rely on TTL to reclaim instead. The map just points at the newest entry.
+    h1 = datetime.now(timezone.utc) + timedelta(hours=1)
+    create = AsyncMock(
+        side_effect=[
+            SimpleNamespace(name="cachedContents/a", expire_time=h1),
+            SimpleNamespace(name="cachedContents/b", expire_time=h1),
+        ]
+    )
+    delete = AsyncMock()
+    schematic._client = _FakeAioClient(schematic._client, create=create, delete=delete)  # type: ignore[assignment]
+    tools, tool_config = schematic._output_tools()
+
+    for _ in range(2):
+        await schematic._store_cache(
+            key="s1",
+            prefix_text="HEAD " * 300,
+            ttl_seconds=300,
+            tools=tools,
+            tool_config=tool_config,
+        )
+
+    assert schematic._managed_caches["s1"][0] == "cachedContents/b"
+    assert delete.await_count == 0
+
+
 async def test_that_a_store_request_generates_and_creates_a_cache_with_the_default_ttl(
     schematic: Gemini_3_1_Flash_Lite[_CacheProbe],
 ) -> None:
@@ -616,6 +650,40 @@ async def test_that_a_load_miss_sends_the_full_prompt_with_inline_tools(
     assert config.tools  # no cache → tools set inline
 
 
+async def test_that_a_vanished_cache_falls_back_to_an_inline_request(
+    schematic: Gemini_3_1_Flash_Lite[_CacheProbe],
+) -> None:
+    # The referenced cache can disappear (expire/delete) ahead of our local view;
+    # a load that 403s on it must not break the request — drop it and retry inline.
+    _seed_cache(schematic, "s1", "HEAD " * 300, name="cachedContents/gone")
+    vanished = ClientError(
+        403,
+        {
+            "error": {
+                "message": "CachedContent not found (or permission denied)",
+                "status": "PERMISSION_DENIED",
+            }
+        },
+    )
+    generate = AsyncMock(side_effect=[vanished, _fake_generation({"answer": "recovered"})])
+    schematic._client = _FakeAioClient(schematic._client, generate=generate)  # type: ignore[assignment]
+
+    result = await schematic._do_generate(
+        "HEAD " * 300 + "tail", hints={"cache": {"action": "load", "key": "s1"}}
+    )
+
+    assert result.content.answer == "recovered"
+    assert generate.await_count == 2
+    first, second = generate.await_args_list
+    # First attempt referenced the (gone) cache; the retry is a full inline request.
+    assert first.kwargs["config"].cached_content == "cachedContents/gone"
+    assert second.kwargs["config"].cached_content is None
+    assert second.kwargs["config"].tools
+    assert second.kwargs["contents"] == "HEAD " * 300 + "tail"
+    # The stale entry is forgotten so later loads don't keep hitting it.
+    assert "s1" not in schematic._managed_caches
+
+
 # ════════════════════════════ 3. LIVE INTEGRATION ══════════════════════════
 
 LIVE = pytest.mark.skipif(
@@ -655,7 +723,6 @@ async def test_that_live_store_then_load_reports_cached_tokens(logger: Logger) -
 
     assert result.info.usage.extra is not None
     assert int(result.info.usage.extra["cached_input_tokens"]) > 0
-    await schematic.aclose()
 
 
 @LIVE
