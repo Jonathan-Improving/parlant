@@ -63,7 +63,7 @@ class Matcher:
     tools, and the offered tool catalog.
     """
 
-    _MAX_AVAILABLE_TOOLS = 10
+    _MAX_AVAILABLE_TOOLS = 16
 
     def __init__(
         self,

@@ -868,11 +868,14 @@ IMPORTANT: No tools should be used in processing your current response!
         for tool in tools:
             line = f"- {tool.name}: {tool.description}"
             if tool.consequential:
+                line = f"- {tool.name}: {tool.description}"
                 line += (
                     " — CONSEQUENTIAL: this tool has a significant, real-world effect. Be careful"
                     " before running it; when appropriate, confirm with the user before going ahead"
-                    " and performing its action."
+                    " and performing its action.\n"
                 )
+            else:
+                line = f"- {tool.name}: {tool.description}\n"
             tool_lines.append(line)
 
         self.add_section(
@@ -880,7 +883,7 @@ IMPORTANT: No tools should be used in processing your current response!
             template="""
 AVAILABLE TOOLS
 ---------------
-For this turn, you MAY use the following tools when they genuinely help fulfill a guideline or the user's request. You are NOT required to use any of them — use a tool only when it is actually useful for the current response. You MAY NOT use any other tools in processing your current response other than the ones listed below.
+For this turn, you should positively consider using the following tools when they genuinely help fulfill a guideline or the user's request. You are NOT required to use any of them — use a tool only when it is actually useful for the current response. You MAY also use any other tools in processing your current response other than the ones listed below, if appropriate under certain corner cases.
 
 {tool_list}
 """,
