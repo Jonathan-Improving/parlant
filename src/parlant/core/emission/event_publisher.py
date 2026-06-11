@@ -215,7 +215,7 @@ class EventPublisher(EventEmitter):
     ) -> Event:
         return await self._store.create_event(
             session_id=self._session_id,
-            source=EventSource.AI_AGENT,
+            source=event.source,
             kind=event.kind,
             trace_id=event.trace_id,
             data=event.data,
