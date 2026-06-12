@@ -28,6 +28,7 @@ const SessionView = (): ReactElement => {
 	const submitButtonRef = useRef<HTMLButtonElement>(null);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const messagesRef = useRef<HTMLDivElement>(null);
+	const scrollContainerRef = useRef<HTMLDivElement>(null);
 
 	const [message, setMessage] = useState('');
 	const [lastOffset, setLastOffset] = useState(0);
@@ -404,12 +405,16 @@ const SessionView = (): ReactElement => {
 		return () => clearInterval(timer);
 	}, [showThinking]);
 
-	// Follow the reasoning as it types out: keep the indicator's bottom in view on
-	// every reveal tick. Instant (not smooth) so the 30ms ticks don't stack
-	// overlapping smooth-scroll animations and stutter.
+	// Follow the reasoning as it types out: pin the scroll container to its bottom
+	// on every reveal tick (and on each new chunk), so the growing multi-line
+	// reasoning stays visible. Setting scrollTop directly is more reliable than
+	// scrollIntoView here, which doesn't consistently follow an element that grows
+	// in place (and lastMessageRef is shared across every message + the indicator).
 	useEffect(() => {
-		if (showThinking) lastMessageRef?.current?.scrollIntoView({behavior: 'instant', block: 'end'});
-	}, [showThinking, thinkingRevealed]);
+		if (!showThinking) return;
+		const el = scrollContainerRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+	}, [showThinking, thinkingRevealed, thinkingDisplay]);
 
 	// Track active SSE connections for streaming messages
 	const streamingConnectionsRef = useRef<Map<string, EventSource>>(new Map());
@@ -618,6 +623,7 @@ const SessionView = (): ReactElement => {
 						{/* <div className={twMerge('h-[21px] border-t-0 bg-white')}></div> */}
 						<div className={twMerge('flex flex-col rounded-es-[16px] rounded-ee-[16px] items-center bg-white mx-auto w-full flex-1 overflow-hidden')}>
 							<div
+								ref={scrollContainerRef}
 								className={twJoin(
 									'messages fixed-scroll flex-1 flex flex-col w-full pb-4 overflow-x-hidden'
 									// '[scroll-snap-type:y_mandatory]'
