@@ -20,7 +20,7 @@ import DateHeader from './date-header/date-header';
 // import SessoinViewHeader from './session-view-header/session-view-header';
 import {getIndexedItemsFromIndexedDB, isSameDay} from '@/lib/utils';
 import {DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger} from '../ui/dropdown-menu';
-import {ShieldEllipsis} from 'lucide-react';
+import {LoaderCircle, ShieldEllipsis} from 'lucide-react';
 import {soundDoubleBlip} from '@/utils/sounds';
 
 const SessionView = (): ReactElement => {
@@ -404,6 +404,13 @@ const SessionView = (): ReactElement => {
 		return () => clearInterval(timer);
 	}, [showThinking]);
 
+	// Follow the reasoning as it types out: keep the indicator's bottom in view on
+	// every reveal tick. Instant (not smooth) so the 30ms ticks don't stack
+	// overlapping smooth-scroll animations and stutter.
+	useEffect(() => {
+		if (showThinking) lastMessageRef?.current?.scrollIntoView({behavior: 'instant', block: 'end'});
+	}, [showThinking, thinkingRevealed]);
+
 	// Track active SSE connections for streaming messages
 	const streamingConnectionsRef = useRef<Map<string, EventSource>>(new Map());
 
@@ -644,17 +651,26 @@ const SessionView = (): ReactElement => {
 								))}
 								{((showTyping && !hasStreamingMessage) || showThinking) && (
 									<div ref={lastMessageRef} className='flex snap-end max-w-[min(1020px,100%)] w-[1020px] self-center'>
-										<div className='bubblesWrapper snap-end' aria-hidden='true'>
-											<div className='bubbles' />
-										</div>
-										{showTyping && !hasStreamingMessage && <p className={twMerge('flex items-center font-normal text-[#A9AFB7] text-[14px] font-inter')}>Typing...</p>}
+										{showTyping && !hasStreamingMessage && (
+											<>
+												<div className='bubblesWrapper snap-end' aria-hidden='true'>
+													<div className='bubbles' />
+												</div>
+												<p className={twMerge('flex items-center font-normal text-[#A9AFB7] text-[14px] font-inter')}>Typing...</p>
+											</>
+										)}
 										{showThinking && (
-									<div className={twMerge('flex items-center font-normal text-[#A9AFB7] text-[14px] font-inter')}>
-										{/* Live markdown rendering of the in-flight reveal prefix. */}
-										<Markdown>{thinkingDisplay.slice(0, thinkingRevealed)}</Markdown>
-										...
-									</div>
-								)}
+											<div className={twMerge('flex items-start gap-[8px] font-normal text-[#A9AFB7] text-[14px] font-inter')}>
+												{/* Spinner pinned to the top (items-start + shrink-0) so it stays put as the stage text grows/wraps. */}
+												<LoaderCircle aria-hidden='true' className='shrink-0 size-[16px] mt-[2px] animate-spin' />
+												{/* items-center keeps the revealed markdown and the trailing "..." inline, as before. */}
+												<div className='flex items-center min-w-0'>
+													{/* Live markdown rendering of the in-flight reveal prefix. */}
+													<Markdown>{thinkingDisplay.slice(0, thinkingRevealed)}</Markdown>
+													...
+												</div>
+											</div>
+										)}
 									</div>
 								)}
 							</div>
