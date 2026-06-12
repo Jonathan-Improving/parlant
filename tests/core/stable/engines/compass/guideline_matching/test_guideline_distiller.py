@@ -1930,3 +1930,31 @@ async def test_that_a_policy_guideline_carries_a_specific_fee_amount_into_the_di
             "(i.e. $45) - the specific $15/day rate must appear, not a vague 'a late fee applies'"
         ),
     )
+
+
+# --- Prompt construction: the agent's reasoning-so-far is fed in (cache-safe) ---
+
+
+def test_that_the_distiller_prompt_includes_the_agent_reasoning_but_keeps_it_out_of_the_cached_prefix(
+    distiller: GuidelineDistiller,
+) -> None:
+    guideline = create_guideline(
+        condition="the customer wants a refund",
+        action="explain the refund process",
+    )
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "I'd like a refund")])
+    context.state = ResponseState(
+        reasoning_steps=[
+            "The customer is asking for a refund on a digital download.",
+            "Digital downloads are refunded automatically, so I will explain that.",
+        ],
+    )
+    shots: Sequence[object] = []  # shots are irrelevant to the reasoning section
+
+    prompt = distiller._build_prompt(context, guideline, shots).build()  # type: ignore[arg-type]
+    assert "refunded automatically" in prompt
+    assert "digital download" in prompt
+
+    # Caching invariant: per-step reasoning must NOT enter the cached shared prefix.
+    shared = distiller._build_shared_prompt(context, shots).build()  # type: ignore[arg-type]
+    assert "refunded automatically" not in shared

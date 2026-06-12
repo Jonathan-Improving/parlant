@@ -18,8 +18,36 @@ which evaluate one guideline per prompt and fan out concurrently."""
 from typing import Sequence
 
 from parlant.core.agents import Effort
+from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+
+
+def add_agent_reasoning(builder: PromptBuilder, reasoning_steps: Sequence[str]) -> None:
+    """Append the agent's reasoning from earlier steps of the current turn, so the
+    per-guideline evaluation is aware of what the agent has already concluded (e.g.
+    that it needs to run a tool, or which facts it has established).
+
+    Added to the per-call tail by callers - NOT the shared prompt - so it stays out
+    of the cached prefix: the reasoning grows with every step, whereas the cached
+    prefix must stay byte-stable across the prefill/load pair and across steps.
+    No-op when there's no reasoning yet (e.g. the initial match)."""
+    if not reasoning_steps:
+        return
+
+    reasoning_text = "\n\n".join(
+        f"Step {i}: {step.strip()}" for i, step in enumerate(reasoning_steps, start=1)
+    )
+    builder.add_section(
+        name="agent-reasoning-so-far",
+        template="""
+AGENT'S REASONING SO FAR THIS TURN
+-----------------
+While preparing the current response, you (the agent) have already reasoned through the steps below, in order. Take this into account when evaluating the guideline - it reflects what you have concluded and what you intend to do next:
+{reasoning_text}
+""",
+        props={"reasoning_text": reasoning_text},
+    )
 
 
 def reasoning_effort_for(context: EngineContext) -> str:

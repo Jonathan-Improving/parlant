@@ -22,6 +22,7 @@ from parlant.core.common import DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.compass.guideline_matching.common import (
+    add_agent_reasoning,
     aggregate_generation_info,
     reasoning_effort_for,
 )
@@ -229,6 +230,12 @@ class GuidelineDistiller:
         # byte-identical within a turn — the prefix `prefill` warms.
         builder = self._build_shared_prompt(context, shots)
 
+        # Per-step reasoning goes in the tail (not the cached shared prefix) so the
+        # cache stays valid while the matching tracks the agent's evolving reasoning.
+        add_agent_reasoning(builder, context.state.reasoning_steps)
+
+        # TODO: It's problematic that tool events aren't on a shared timeline
+        # with the reasoning steps. Fix this at some point.
         builder.add_staged_tool_events(context.state.tool_events)
 
         builder.add_section(

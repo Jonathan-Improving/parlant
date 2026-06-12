@@ -27,6 +27,7 @@ from parlant.core.engines.alpha.prompt_builder import (
     SectionStatus,
 )
 from parlant.core.engines.compass.guideline_matching.common import (
+    add_agent_reasoning,
     aggregate_generation_info,
     reasoning_effort_for,
 )
@@ -261,6 +262,12 @@ class GuidelineRanker:
         # fan-out, so everything before it stays byte-identical within a turn.
         builder = self._build_shared_prompt(context, shots)
 
+        # Per-step reasoning goes in the tail (not the cached shared prefix) so the
+        # cache stays valid while the matching tracks the agent's evolving reasoning.
+        add_agent_reasoning(builder, context.state.reasoning_steps)
+
+        # TODO: It's problematic that tool events aren't on a shared timeline
+        # with the reasoning steps. Fix this at some point.
         builder.add_staged_tool_events(context.state.tool_events)
 
         builder.add_section(

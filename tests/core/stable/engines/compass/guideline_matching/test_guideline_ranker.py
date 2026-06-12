@@ -12,20 +12,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Sequence
+
 from lagom import Container
 from pytest import fixture
 
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
+from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.sessions import EventSource
 
 from tests.core.stable.engines.compass.guideline_matching.utils import (
     base_test_that_guidelines_are_ranked_correctly,
+    create_engine_context,
+    create_guideline,
 )
 
 
 @fixture
 def ranker(container: Container) -> GuidelineRanker:
     return container[GuidelineRanker]
+
+
+def test_that_the_ranker_prompt_includes_the_agent_reasoning_but_keeps_it_out_of_the_cached_prefix(
+    ranker: GuidelineRanker,
+) -> None:
+    guideline = create_guideline(
+        condition="the customer asks about toppings",
+        action="list the available toppings",
+    )
+    context = create_engine_context(
+        conversation=[(EventSource.CUSTOMER, "what toppings do you have?")]
+    )
+    context.state = ResponseState(
+        reasoning_steps=[
+            "The customer asked which toppings are available.",
+            "I should list the available toppings from current stock.",
+        ],
+    )
+    shots: Sequence[object] = []  # shots are irrelevant to the reasoning section
+
+    prompt = ranker._build_prompt(context, guideline, shots).build()  # type: ignore[arg-type]
+    assert "list the available toppings from current stock" in prompt
+
+    # Caching invariant: per-step reasoning must NOT enter the cached shared prefix.
+    shared = ranker._build_shared_prompt(context, shots).build()  # type: ignore[arg-type]
+    assert "list the available toppings from current stock" not in shared
 
 
 GUIDELINES_DICT: dict[str, dict[str, str]] = {

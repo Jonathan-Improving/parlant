@@ -57,6 +57,13 @@ class ResponseState:
     # session id.
     cache_nonce: str = ""
 
+    # The agent's reasoning from each step of the response loop so far this turn,
+    # in order. The loop appends to it after every step; the matching components
+    # (ranker, distiller) feed it into their per-guideline prompts so each step's
+    # evaluation is aware of what the agent has already concluded. Empty on the
+    # initial match (no steps have run yet).
+    reasoning_steps: list[str] = field(default_factory=list)
+
     # Per-turn signals the matcher precomputes (once) so its per-guideline strategy
     # selection can stay synchronous: guidelines that carry tools, and guidelines
     # that participate in a dependency relationship.

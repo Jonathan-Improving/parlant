@@ -194,6 +194,12 @@ class BaseLoop(Loop):
 
             await self._run_step(job, state)
 
+            # Surface each step's reasoning onto the shared state so the next step's
+            # matching (ranker, distiller) is aware of what the agent has concluded.
+            job.context.state.reasoning_steps = [
+                s.message.reasoning for s in state.steps if s.message.reasoning
+            ]
+
             job.context.state.iterations.append(
                 IterationState(
                     matched_guidelines=[],
