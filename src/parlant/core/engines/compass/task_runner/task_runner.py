@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from itertools import chain
 
 from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
-from parlant.core.engines.alpha.guideline_matching.generic.common import internal_representation
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import LoopJob
@@ -224,8 +223,8 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         self,
         context: EngineContext,
     ) -> str:
-        guideline_representations = {
-            m.guideline.id: internal_representation(m.guideline)
+        guidelines = {
+            m.guideline.id: m.guideline
             for m in chain(
                 context.state.ordinary_guideline_matches,
                 context.state.tool_enabled_guideline_matches,
@@ -243,12 +242,12 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         builder.add_matched_low_criticality_guidelines(
             context.state.ordinary_guideline_matches,
             context.state.tool_enabled_guideline_matches,
-            guideline_representations,
+            guidelines,
         )
         builder.add_matched_guidelines(
             context.state.ordinary_guideline_matches,
             context.state.tool_enabled_guideline_matches,
-            guideline_representations,
+            guidelines,
         )
         builder.add_tool_descriptions(context.state.matched_tools)
 

@@ -15,7 +15,6 @@
 from datetime import datetime, timezone
 
 from parlant.core.common import Criticality, generate_id
-from parlant.core.engines.alpha.guideline_matching.generic.common import internal_representation
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
@@ -58,22 +57,22 @@ def _match(
 def test_that_guideline_instructions_explain_how_to_follow_without_listing_guidelines() -> None:
     prompt = PromptBuilder().add_guideline_instructions().build()
 
-    assert "RELEVANT DOMAIN PROTOCOL GUIDELINES" in prompt
-    assert "You may choose not to follow a guideline only" in prompt
+    assert "RELEVANT DOMAIN PROTOCOL INSTRUCTIONS" in prompt
+    assert "You may choose not to follow an instruction only" in prompt
     # The explanation must not contain any of the actual matched guidelines.
-    assert "Guideline #" not in prompt
+    assert "Instruction #" not in prompt
 
 
 def test_that_matched_guidelines_list_the_guidelines_without_the_explanation() -> None:
     match = _match("the customer asks about toppings", "list the available toppings")
-    representations = {match.guideline.id: internal_representation(match.guideline)}
+    guidelines = {match.guideline.id: match.guideline}
 
-    prompt = PromptBuilder().add_matched_guidelines([match], {}, representations).build()
+    prompt = PromptBuilder().add_matched_guidelines([match], {}, guidelines).build()
 
-    assert "Guideline #1)" in prompt
+    assert "Instruction #1)" in prompt
     assert "list the available toppings" in prompt
     # The how/when explanation belongs to add_guideline_instructions, not here.
-    assert "You may choose not to follow a guideline only" not in prompt
+    assert "You may choose not to follow an instruction only" not in prompt
 
 
 def test_that_matched_guidelines_lead_with_a_skip_if_already_satisfied_rule() -> None:
@@ -81,9 +80,9 @@ def test_that_matched_guidelines_lead_with_a_skip_if_already_satisfied_rule() ->
     # same recency as the guidelines themselves rather than living far up in the
     # cached system block.
     match = _match("the customer asks about toppings", "list the available toppings")
-    representations = {match.guideline.id: internal_representation(match.guideline)}
+    guidelines = {match.guideline.id: match.guideline}
 
-    prompt = PromptBuilder().add_matched_guidelines([match], {}, representations).build()
+    prompt = PromptBuilder().add_matched_guidelines([match], {}, guidelines).build()
 
     assert "ALREADY satisfied" in prompt
     assert "skip it silently" in prompt
@@ -94,16 +93,16 @@ def test_that_matched_guidelines_lead_with_a_skip_if_already_satisfied_rule() ->
 def test_that_matched_guidelines_renders_an_empty_state_when_there_are_no_matches() -> None:
     prompt = PromptBuilder().add_matched_guidelines([], {}, {}).build()
 
-    assert "Guideline #" not in prompt
-    assert "No special behavioral guidelines" in prompt
+    assert "Instruction #" not in prompt
+    assert "No special behavioral instructions" in prompt
 
 
 def test_that_matched_guidelines_list_their_associated_tools() -> None:
     match = _match("the customer asks about the weather", "tell them the forecast")
-    representations = {match.guideline.id: internal_representation(match.guideline)}
+    guidelines = {match.guideline.id: match.guideline}
     tool_enabled = {match: [ToolId(service_name="local", tool_name="get_weather")]}
 
-    prompt = PromptBuilder().add_matched_guidelines([], tool_enabled, representations).build()
+    prompt = PromptBuilder().add_matched_guidelines([], tool_enabled, guidelines).build()
 
     assert "tell them the forecast" in prompt
     assert "get_weather" in prompt
@@ -112,13 +111,11 @@ def test_that_matched_guidelines_list_their_associated_tools() -> None:
 
 def test_that_matched_low_criticality_guidelines_list_their_associated_tools() -> None:
     match = _match("the customer greets you", "greet back", criticality=Criticality.LOW)
-    representations = {match.guideline.id: internal_representation(match.guideline)}
+    guidelines = {match.guideline.id: match.guideline}
     tool_enabled = {match: [ToolId(service_name="local", tool_name="say_hello")]}
 
     prompt = (
-        PromptBuilder()
-        .add_matched_low_criticality_guidelines([], tool_enabled, representations)
-        .build()
+        PromptBuilder().add_matched_low_criticality_guidelines([], tool_enabled, guidelines).build()
     )
 
     assert "greet back" in prompt
@@ -143,11 +140,9 @@ def test_that_matched_low_criticality_guidelines_list_the_principles() -> None:
         "keep it brief",
         criticality=Criticality.LOW,
     )
-    representations = {match.guideline.id: internal_representation(match.guideline)}
+    guidelines = {match.guideline.id: match.guideline}
 
-    prompt = (
-        PromptBuilder().add_matched_low_criticality_guidelines([match], {}, representations).build()
-    )
+    prompt = PromptBuilder().add_matched_low_criticality_guidelines([match], {}, guidelines).build()
 
     assert "keep it brief" in prompt
 
@@ -155,18 +150,19 @@ def test_that_matched_low_criticality_guidelines_list_the_principles() -> None:
 # ─────────────────────────── tool descriptions ──────────────────────────────
 
 
-def test_that_tool_descriptions_list_name_and_description_as_optional() -> None:
+def test_that_tool_descriptions_list_relevant_tools_framed_as_optional() -> None:
     prompt = (
         PromptBuilder()
         .add_tool_descriptions([_tool("get_weather", "Get the current weather for a city.")])
         .build()
     )
 
-    assert "AVAILABLE TOOLS" in prompt
-    assert "get_weather: Get the current weather for a city." in prompt
-    # Framed as optional — the agent may use them but doesn't have to.
-    assert "MAY use the following tools" in prompt
-    assert "NOT required" in prompt
+    assert "RELEVANT TOOLS" in prompt
+    # Non-consequential tools are listed by name only (no description line).
+    assert "- get_weather" in prompt
+    # Framed as optional — the agent should consider them but doesn't have to.
+    assert "positively consider using the following tools" in prompt
+    assert "not required to use any of them" in prompt
 
 
 def test_that_consequential_tools_carry_a_caution_note() -> None:
@@ -193,5 +189,5 @@ def test_that_consequential_tools_carry_a_caution_note() -> None:
 def test_that_tool_descriptions_render_an_empty_state_when_there_are_no_tools() -> None:
     prompt = PromptBuilder().add_tool_descriptions([]).build()
 
-    assert "No tools should be used" in prompt
-    assert "AVAILABLE TOOLS" not in prompt
+    assert "No tools have been specifically highlighted" in prompt
+    assert "RELEVANT TOOLS" not in prompt

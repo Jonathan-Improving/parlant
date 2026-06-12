@@ -697,25 +697,25 @@ These guidelines have already been pre-filtered based on the interaction's conte
         self.add_section(
             name=BuiltInSection.GUIDELINE_INSTRUCTIONS,
             template="""
-## RELEVANT DOMAIN PROTOCOL GUIDELINES
+## RELEVANT DOMAIN PROTOCOL INSTRUCTIONS
 
-When crafting your reply, follow the behavioral guidelines (provided toward the end of the prompt) to the extent that they are (still) relevant to the current state of the interaction. The guidelines to keep in mind, if any, will be provided to you in a separate instruction later in the conversation.
+When crafting your reply, follow the behavioral instructions (provided toward the end of the prompt) to the extent that they are (still) relevant to the current state of the interaction. The instructions to keep in mind, if any, will be provided to you in a separate instruction later in the conversation.
 
-Some guidelines are tied to conditions related to you, the agent (e.g., "When you are likely/about to do something"). You should only follow these guidelines if you are actually going to produce a message that activates the condition.
+Some instructions are tied to conditions related to you, the agent (e.g., "When you are likely/about to do something"). You should only follow these instructions if you are actually going to produce a message that activates the condition.
 
-Some guidelines may require asking specific questions and getting clear answers to them from the user. Never skip these questions, even if you believe the user already provided the answer. Instead, ask them to confirm their previous response.
+Some instructions may require asking specific questions and getting clear answers to them from the user. Never skip these questions, even if you believe the user already provided the answer. Instead, ask them to confirm their previous response.
 
-You may choose not to follow a guideline only in the following cases:
-    - You have already followed the guideline and the context of its application doesn't merit following it again (i.e., it would be purely repetitive).
+You may choose not to follow an instruction only in the following cases:
+    - You have already followed the instruction and the context of its application doesn't merit following it again (i.e., it would be purely repetitive).
     - It conflicts with a previous user request.
     - It is clearly inappropriate given the current context of the conversation.
     - It lacks sufficient context or data to apply reliably.
     - It conflicts with an insight.
     - It depends on an agent intention condition that does not apply in the current situation (as mentioned above)
-    - If a guideline offers multiple options (e.g., "do X or Y") and another more specific guideline restricts one of those options (e.g., "don’t do X"), follow both by
+    - If an instruction offers multiple options (e.g., "do X or Y") and another more specific instruction restricts one of those options (e.g., "don’t do X"), follow both by
         choosing the permitted alternative (i.e., do Y).
 
-In all other situations, you are expected to follow the guidelines when and as appropriate.
+In all other situations, you are expected to follow the instructions when and as appropriate.
 """,
             status=SectionStatus.ACTIVE,
         )
@@ -725,16 +725,12 @@ In all other situations, you are expected to follow the guidelines when and as a
         self,
         ordinary: Sequence[GuidelineMatch],
         tool_enabled: Mapping[GuidelineMatch, Sequence[ToolId]],
-        guideline_representations: dict[GuidelineId, GuidelineInternalRepresentation],
+        guidelines: dict[GuidelineId, Guideline],
     ) -> PromptBuilder:
-        """The *list* half of ``add_guidelines_for_message_generation``: the
-        matched guidelines themselves, without the how/when explanation (which is
-        added separately via :meth:`add_guideline_instructions`). Per-turn data,
-        intended for turn-level instructions."""
         all_matches = [
             match
             for match in chain(ordinary, tool_enabled)
-            if guideline_representations[match.guideline.id].action
+            if guidelines[match.guideline.id].content.action
             and not match.guideline.criticality == Criticality.LOW
         ]
 
@@ -742,83 +738,73 @@ In all other situations, you are expected to follow the guidelines when and as a
             self.add_section(
                 name=BuiltInSection.GUIDELINE_LIST,
                 template="""
-No special behavioral guidelines are relevant right now, so you don't need to specifically double-check if you followed or broke any guidelines.
+No special behavioral instructions are relevant right now, so you don't need to specifically double-check if you followed or broke any instructions.
 """,
                 status=SectionStatus.PASSIVE,
             )
             return self
 
-        guidelines = []
-        agent_intention_guidelines = []
+        guideline_texts = []
         customer_dependent_guideline_indices = []
 
         for i, p in enumerate(all_matches, start=1):
-            if guideline_representations[p.guideline.id].action:
+            if guidelines[p.guideline.id].content.action:
                 if cast(
                     dict[str, bool],
                     p.guideline.metadata.get("customer_dependent_action_data", dict()),
                 ).get("is_customer_dependent", False):
                     customer_dependent_guideline_indices.append(i)
 
-                if guideline_representations[p.guideline.id].condition:
-                    guideline = f"Guideline #{i}) When {guideline_representations[p.guideline.id].condition}, then {guideline_representations[p.guideline.id].action}"
+                if action := p.metadata.get("distilled_action"):
+                    guideline = f"Instruction #{i}) {action}"
                 else:
-                    guideline = (
-                        f"Guideline #{i}) {guideline_representations[p.guideline.id].action}"
-                    )
+                    if guidelines[p.guideline.id].content.condition:
+                        guideline = f"Instruction #{i}) When {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
+                    else:
+                        guideline = f"Instruction #{i}) {guidelines[p.guideline.id].content.action}"
 
-                if guideline_representations[p.guideline.id].description:
-                    guideline += f"\n      - Description: {guideline_representations[p.guideline.id].description}"
+                    if description := guidelines[p.guideline.id].content.description:
+                        guideline += f"\nDetails: {description.strip()}"
 
                 if p.rationale:
-                    guideline += f"\n      - Rationale: {p.rationale}"
+                    guideline += f"\n(Note: {p.rationale})"
 
                 if tool_ids := tool_enabled.get(p):
                     tool_names = ", ".join(tool_id.tool_name for tool_id in tool_ids)
-                    guideline += (
-                        "\n      - To carry this out, consider using the following "
-                        f"tool(s): {tool_names}"
-                    )
+                    guideline += f"\nTo carry this out, consider using the tool(s): {tool_names}"
 
-                if p.guideline.metadata.get("agent_intention_condition"):
-                    agent_intention_guidelines.append(guideline)
-                else:
-                    guidelines.append(guideline)
+                guideline_texts.append(guideline)
 
-        guideline_list = "\n".join(guidelines)
-        agent_intention_guidelines_list = "\n".join(agent_intention_guidelines)
+        guideline_list = "\n\n".join(guideline_texts)
 
         guideline_block = """\
-Here are the behavioral guidelines for our domain, each written as "When <condition>, then <action>". These are STANDING rules, not commands to act on right now: a guideline appearing here does NOT mean you must apply it again in this message.
+Here are the behavioral instructions for our domain, each written as "When <condition>, then <action>". These are STANDING rules, not commands to act on right now: a instruction appearing here does NOT necessarily mean you must apply it again in this message.
 
-This whole assessment is INTERNAL. Your reply must contain ONLY your message to the user — never narrate or preface it, and never mention guidelines, considerations, or that you are checking anything. In particular, do NOT write things like "Let me check the guidelines before I reply" or "Based on the guidelines, ...". Just write the reply itself.
+This whole assessment is INTERNAL. Your reply must contain ONLY your message to the user — never narrate or preface it, and never mention instructions, considerations, or that you are checking anything. In particular, do NOT write things like "Let me check the instructions before I reply" or "Based on the instructions, ...". Just write the reply itself.
 
-IMPORTANT: Consider, before applying any guideline below, what has already happened in the conversation. Do not obsessively repeat guidelines you've already followed sufficiently in the conversation so far:
-- If you have ALREADY satisfied a guideline's action, and nothing new has happened to re-trigger its condition, it is DONE. Do NOT restate it, re-offer it, or remind the user of it. Repeating a guideline you've already fulfilled reads as obsessive and is a mistake — skip it silently and move the conversation forward.
-- Apply a guideline only when its condition is currently (and still) active AND its action has not already been addressed earlier in the conversation.
-- For agent-intention guidelines ("When you are likely/about to ..."), apply them only if you are actually about to produce a message that activates the condition.
+IMPORTANT: Consider, before applying any instruction below, what has already happened in the conversation. Do not obsessively repeat instructions you've already followed sufficiently in the conversation so far:
+- If you have ALREADY satisfied a instruction's action, and nothing new has happened to re-trigger its condition, it is DONE. Do NOT restate it, re-offer it, or remind the user of it. Repeating a instruction you've already fulfilled reads as obsessive and is a mistake — skip it silently and move the conversation forward.
+- Apply a instruction only when its condition is currently (and still) active AND its action has not already been addressed earlier in the conversation.
+- For agent-intention instructions ("When you are likely/about to ..."), apply them only if you are actually about to produce a message that activates the condition.
 
-When unsure whether you've already covered a guideline, prefer NOT repeating it.
-    """
+When unsure whether you've already covered a instruction, prefer NOT repeating it.
 
-        if agent_intention_guidelines_list:
-            guideline_block += """
-- **Guidelines with agent intention condition**:
-    {agent_intention_guidelines_list}
-    """
+Here are the instructions that are currently most relevant:
+"""
 
         if guideline_list:
             guideline_block += """
-- **Guidelines**:
-    {guideline_list}
-    """
+## Instructions
+
+{guideline_list}
+"""
 
         if customer_dependent_guideline_indices:
             customer_dependent_guideline_indices_str = ", ".join(
                 [str(i) for i in customer_dependent_guideline_indices]
             )
             guideline_block += """
-Important note - some guidelines ({customer_dependent_guideline_indices_str}) may require asking specific questions. When that is the case, never skip such questions, even if you believe the user already provided the answer. Instead, ask them to confirm their previous response.
+Important note - some instructions ({customer_dependent_guideline_indices_str}) may require asking specific questions. When that is the case, never skip such questions, even if you believe the user already provided the answer. Instead, ask them to confirm their previous response.
 """
         else:
             customer_dependent_guideline_indices_str = ""
@@ -828,7 +814,6 @@ Important note - some guidelines ({customer_dependent_guideline_indices_str}) ma
             template=guideline_block,
             props={
                 "guideline_list": guideline_list,
-                "agent_intention_guidelines_list": agent_intention_guidelines_list,
                 "customer_dependent_guideline_indices_str": customer_dependent_guideline_indices_str,
             },
             status=SectionStatus.ACTIVE,
@@ -851,14 +836,15 @@ If you are provided with guidelines that have been detected as relevant to the c
         return self
 
     def add_tool_descriptions(self, tools: Sequence[Tool]) -> PromptBuilder:
-        """List the tools available for this response — each tool's name and
-        description — with a caution on consequential ones. Framed as optional:
-        the agent MAY use these tools, but is never required to."""
+        any_consequential = False
+        consequential_note = "If a tool has a significant, real-world effect, it will be marked with CONSEQUENTIAL. In that case, be careful before running it. Read its description carefully and, when appropriate, confirm with the user before going ahead and performing its action."
+
         if not tools:
             self.add_section(
                 name=BuiltInSection.TOOL_DESCRIPTIONS,
                 template="""
-IMPORTANT: No tools should be used in processing your current response!
+No tools have been specifically highlighted to be used in processing your current response.
+But if you find that using any of the tools you are aware of would be *obviously* and *directly* helpful for fulfilling the user's request or adhering to a guideline, feel free to use them as you see fit.
 """,
                 status=SectionStatus.PASSIVE,
             )
@@ -866,28 +852,29 @@ IMPORTANT: No tools should be used in processing your current response!
 
         tool_lines = []
         for tool in tools:
-            line = f"- {tool.name}: {tool.description}"
             if tool.consequential:
-                line = f"- {tool.name}: {tool.description}"
-                line += (
-                    " — CONSEQUENTIAL: this tool has a significant, real-world effect. Be careful"
-                    " before running it; when appropriate, confirm with the user before going ahead"
-                    " and performing its action.\n"
-                )
+                any_consequential = True
+                line = f"- {tool.name} - CONSEQUENTIAL\n"
+                line += f"[Tool description reminder]: {tool.description}\n\n"
             else:
-                line = f"- {tool.name}: {tool.description}\n"
+                line = f"- {tool.name}"
             tool_lines.append(line)
 
         self.add_section(
             name=BuiltInSection.TOOL_DESCRIPTIONS,
             template="""
-AVAILABLE TOOLS
----------------
-For this turn, you should positively consider using the following tools when they genuinely help fulfill a guideline or the user's request. You are NOT required to use any of them — use a tool only when it is actually useful for the current response. You MAY also use any other tools in processing your current response other than the ones listed below, if appropriate under certain corner cases.
+RELEVANT TOOLS
+--------------
+For this turn of the interaction, some tools have been identified as particularly relevant. You should positively consider using the following tools when they genuinely help fulfill a guideline or the user's request — but you are not required to use any of them; use a tool only when it is actually useful for the current response. You MAY also use any other tools that you are aware of in processing your current response, other than the ones listed below, if appropriate under certain corner cases.
+
+{consequential_note}
 
 {tool_list}
 """,
-            props={"tool_list": "\n".join(tool_lines)},
+            props={
+                "tool_list": "\n".join(tool_lines),
+                "consequential_note": consequential_note if any_consequential else "",
+            },
             status=SectionStatus.ACTIVE,
         )
         return self
@@ -896,14 +883,14 @@ For this turn, you should positively consider using the following tools when the
         self,
         ordinary: Sequence[GuidelineMatch],
         tool_enabled: Mapping[GuidelineMatch, Sequence[ToolId]],
-        guideline_representations: dict[GuidelineId, GuidelineInternalRepresentation],
+        guidelines: dict[GuidelineId, Guideline],
     ) -> PromptBuilder:
         """The *list* half of ``add_low_criticality_guidelines``: the
         low-criticality principles themselves, without the explanation."""
         all_matches = [
             match
             for match in chain(ordinary, tool_enabled)
-            if guideline_representations[match.guideline.id].action
+            if guidelines[match.guideline.id].content.action
         ]
         low_critical_matches = [
             m for m in all_matches if m.guideline.criticality == Criticality.LOW
@@ -911,12 +898,10 @@ For this turn, you should positively consider using the following tools when the
         if low_critical_matches:
             low_criticality_guidelines = []
             for p in low_critical_matches:
-                if guideline_representations[p.guideline.id].condition:
-                    guideline = f" - When {guideline_representations[p.guideline.id].condition}, then {guideline_representations[p.guideline.id].action}"
+                if guidelines[p.guideline.id].content.condition:
+                    guideline = f" - When {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
                 else:
-                    guideline = (
-                        f" - When always, then {guideline_representations[p.guideline.id].action}"
-                    )
+                    guideline = f" - When always, then {guidelines[p.guideline.id].content.action}"
                 if tool_ids := tool_enabled.get(p):
                     tool_names = ", ".join(tool_id.tool_name for tool_id in tool_ids)
                     guideline += (
