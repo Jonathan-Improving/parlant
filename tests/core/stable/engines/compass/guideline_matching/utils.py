@@ -57,6 +57,7 @@ def create_guideline(
     condition: str,
     action: str | None = None,
     *,
+    description: str | None = None,
     tags: list[TagId] = [],
 ) -> Guideline:
     """Build a standalone ``Guideline`` (no store) for unit tests."""
@@ -64,7 +65,7 @@ def create_guideline(
         id=GuidelineId(generate_id()),
         creation_utc=datetime.now(timezone.utc),
         modified_utc=datetime.now(timezone.utc),
-        content=GuidelineContent(condition=condition, action=action),
+        content=GuidelineContent(condition=condition, action=action, description=description),
         criticality=Criticality.MEDIUM,
         enabled=True,
         tags=tags,

@@ -14,29 +14,26 @@
 
 import asyncio
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from parlant.core.capabilities import Capability
 from parlant.core.common import DefaultBaseModel, JSONSerializable
-from parlant.core.context_variables import ContextVariable, ContextVariableValue
-from parlant.core.emissions import EmittedEvent
 from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
+from parlant.core.engines.compass.guideline_matching.common import (
+    aggregate_generation_info,
+    reasoning_effort_for,
+)
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.glossary import Term
-from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
+from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
+from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.sessions import Event, EventId, EventKind, EventSource
 from parlant.core.shots import Shot, ShotCollection
 from parlant.core.tools import Tool, ToolId
-
-# A guideline distilled from a journey may carry the tools attached to its
-# tool-using steps. Tools are provided per guideline, keyed by guideline id.
-GuidelineTools = Mapping[GuidelineId, Sequence[tuple[ToolId, Tool]]]
+from parlant.core.tracer import Tracer
 
 
 @dataclass(frozen=True)
@@ -50,6 +47,9 @@ class DistilledGuideline:
 @dataclass(frozen=True)
 class GuidelineDistillationResult:
     distilled_guidelines: Sequence[DistilledGuideline]
+    # Aggregated usage across every per-guideline distillation request this call,
+    # or None when no requests were sent.
+    generation_info: GenerationInfo | None
 
 
 class GuidelineDistillSchema(DefaultBaseModel):
@@ -67,85 +67,103 @@ class GuidelineDistillationShot(Shot):
 
 
 class GuidelineDistiller:
-    """Extracts the next relevant action out of a (potentially verbose) guideline.
+    """Distills a (potentially verbose) guideline down to the guidance relevant right now.
 
-    A guideline's action may describe many things to do across different situations, or
-    spell out a checklist. The distiller evaluates whether the guideline currently
-    applies and, if so, extracts only the part of the action that is relevant to the
-    next agent response. Each guideline is evaluated in its own prompt.
+    A guideline's action and detailed instructions may describe many things across
+    different situations - an ordered sequence of steps, or a set of rules and
+    information. The distiller evaluates whether the guideline currently applies and, if
+    so, extracts exactly the guidance relevant to the next agent response: the next step
+    for a sequential action, or every applicable rule for a policy. Each guideline is
+    evaluated in its own prompt.
     """
 
     def __init__(
         self,
         logger: Logger,
+        tracer: Tracer,
         schematic_generator: SchematicGenerator[GuidelineDistillSchema],
     ) -> None:
         self._logger = logger
+        self._tracer = tracer
         self._schematic_generator = schematic_generator
 
     async def distill(
         self,
         context: EngineContext,
         guidelines: Sequence[Guideline],
-        *,
-        tools: GuidelineTools = {},
-        context_variables: Sequence[tuple[ContextVariable, ContextVariableValue]] = [],
-        terms: Sequence[Term] = [],
-        capabilities: Sequence[Capability] = [],
-        staged_events: Sequence[EmittedEvent] = [],
     ) -> GuidelineDistillationResult:
         if not guidelines:
-            return GuidelineDistillationResult([])
+            return GuidelineDistillationResult([], None)
 
-        distilled_guidelines = await asyncio.gather(
-            *(
-                self._distill_guideline(
-                    context,
-                    guideline,
-                    tools=tools.get(guideline.id, []),
-                    context_variables=context_variables,
-                    terms=terms,
-                    capabilities=capabilities,
-                    staged_events=staged_events,
+        with self._tracer.span("guideline.distill"):
+            if len(guidelines) > 1:
+                # Warm-then-fan-out (see GuidelineRanker.rank): distill the first
+                # guideline and AWAIT it so the shared prompt prefix is cached, then
+                # fan out the rest concurrently against the warm cache.
+                first = await self._distill_guideline(context, guidelines[0])
+                rest = await asyncio.gather(
+                    *(self._distill_guideline(context, guideline) for guideline in guidelines[1:])
                 )
-                for guideline in guidelines
-            )
-        )
+                results = [first, *rest]
+            else:
+                results = [await self._distill_guideline(context, guidelines[0])]
 
-        return GuidelineDistillationResult(list(distilled_guidelines))
+            return GuidelineDistillationResult(
+                distilled_guidelines=[distilled for distilled, _ in results],
+                generation_info=aggregate_generation_info([info for _, info in results]),
+            )
 
     async def _distill_guideline(
         self,
         context: EngineContext,
         guideline: Guideline,
-        *,
-        tools: Sequence[tuple[ToolId, Tool]],
-        context_variables: Sequence[tuple[ContextVariable, ContextVariableValue]],
-        terms: Sequence[Term],
-        capabilities: Sequence[Capability],
-        staged_events: Sequence[EmittedEvent],
-    ) -> DistilledGuideline:
-        prompt = self._build_prompt(
-            context,
-            guideline,
-            shots=await self.shots(),
-            tools=tools,
-            context_variables=context_variables,
-            terms=terms,
-            capabilities=capabilities,
-            staged_events=staged_events,
+    ) -> tuple[DistilledGuideline, GenerationInfo]:
+        prompt = self._build_prompt(context, guideline, shots=await self.shots())
+
+        inference = await self._schematic_generator.generate(
+            prompt=prompt,
+            hints={
+                "reasoning_effort": reasoning_effort_for(context),
+                "cache": {"action": "load", "key": self._cache_key(context)},
+            },
         )
 
-        inference = await self._schematic_generator.generate(prompt=prompt)
-
-        self._logger.trace(f"Completion:\n{inference.content.model_dump_json(indent=2)}")
-
-        return DistilledGuideline(
-            guideline=guideline,
-            reasoning=inference.content.reasoning,
-            is_relevant=inference.content.is_relevant,
-            distilled_action=inference.content.distilled_action,
+        return (
+            DistilledGuideline(
+                guideline=guideline,
+                reasoning=inference.content.reasoning,
+                is_relevant=inference.content.is_relevant,
+                distilled_action=inference.content.distilled_action,
+            ),
+            inference.info,
         )
+
+    def _cache_key(self, context: EngineContext) -> str:
+        # Namespace the provider cache per session+nonce AND component, so components
+        # that cache concurrently never clobber a shared entry. The nonce (minted in
+        # CompassEngine.initialize, shared across the session's turns) is stable across
+        # the store (prefill) / load (distill) pair.
+        return f"{context.session.id}.{context.state.cache_nonce}.guideline-distiller"
+
+    async def prefill(self, context: EngineContext) -> GenerationInfo | None:
+        """Warm the generator's cache for the distiller's shared prompt prefix, so
+        the per-guideline fan-out's `cache: load` requests hit it. The throwaway
+        generation triggers the `cache: store`. Best-effort: warming failures must
+        not break preparation. See :meth:`GuidelineRanker.prefill`."""
+        with self._tracer.span("guideline.distill-prefill"):
+            try:
+                prompt = self._build_shared_prompt(context, shots=await self.shots())
+                inference = await self._schematic_generator.generate(
+                    prompt=prompt,
+                    hints={
+                        "reasoning_effort": reasoning_effort_for(context),
+                        "cache": {"action": "store", "key": self._cache_key(context)},
+                    },
+                )
+                return inference.info
+            except Exception as exc:
+                self._logger.warning(f"Guideline distiller prefill failed (continuing): {exc}")
+                return None
 
     async def shots(self) -> Sequence[GuidelineDistillationShot]:
         return await shot_collection.list()
@@ -182,7 +200,7 @@ class GuidelineDistiller:
 
         formatted_shot += f"""
 - **Guideline**:
-{_format_guideline(shot.guideline.condition, shot.guideline.action)}
+{_format_guideline(shot.guideline.condition, shot.guideline.action, shot.guideline.description)}
 
 """
 
@@ -204,14 +222,45 @@ class GuidelineDistiller:
         context: EngineContext,
         guideline: Guideline,
         shots: Sequence[GuidelineDistillationShot],
-        *,
-        tools: Sequence[tuple[ToolId, Tool]],
-        context_variables: Sequence[tuple[ContextVariable, ContextVariableValue]],
-        terms: Sequence[Term],
-        capabilities: Sequence[Capability],
-        staged_events: Sequence[EmittedEvent],
     ) -> PromptBuilder:
-        builder = PromptBuilder(on_build=lambda prompt: self._logger.trace(f"Prompt:\n{prompt}"))
+        # The cross-turn/within-turn-stable shared prefix, then the per-guideline
+        # tail: staged tool events and the specific guideline (with its tools). The
+        # guideline is what differs across the fan-out, so everything before it stays
+        # byte-identical within a turn — the prefix `prefill` warms.
+        builder = self._build_shared_prompt(context, shots)
+
+        builder.add_staged_tool_events(context.state.tool_events)
+
+        builder.add_section(
+            name=BuiltInSection.GUIDELINES,
+            template="""
+- Guideline: ###
+{guideline_text}
+###
+""",
+            props={
+                "guideline_text": _format_guideline(
+                    guideline.content.condition,
+                    guideline.content.action,
+                    guideline.content.description,
+                    context.state.tools_by_guideline.get(guideline.id, []),
+                ),
+            },
+            status=SectionStatus.ACTIVE,
+        )
+
+        return builder
+
+    def _build_shared_prompt(
+        self,
+        context: EngineContext,
+        shots: Sequence[GuidelineDistillationShot],
+    ) -> PromptBuilder:
+        """The shared head of the distiller prompt (instructions, shots, identities,
+        output format, and the per-turn context) — everything except the specific
+        guideline. Stays byte-identical across the per-guideline fan-out, so it's the
+        prefix `prefill` warms."""
+        builder = PromptBuilder()
 
         builder.add_section(
             name="guideline-distiller-general-instructions",
@@ -234,7 +283,7 @@ Each guideline is composed of two parts:
             template="""
 Task Description
 ----------------
-Your task is twofold. First, evaluate whether the provided guideline applies to the most recent state of the interaction between yourself (an AI agent) and a user. Second, if it does apply, determine how its action should be carried out right now and distill it into the single, specific action the agent should take in its very next response.
+Your task is twofold. First, evaluate whether the provided guideline applies to the most recent state of the interaction between yourself (an AI agent) and a user. Second, if it does apply, distill the guideline - its action together with any detailed instructions - down to exactly the guidance the agent needs for its very next response.
 
 Determining applicability:
 A guideline applies in either of these cases:
@@ -242,18 +291,27 @@ A guideline applies in either of these cases:
 2. Its condition applied earlier and the agent is still in the middle of carrying out the action. Many actions span several steps, so a guideline remains applicable until its action has been fully carried out. For example, for the action "when the customer wants a drink, ask which drink and then which size", if the customer asked for a drink and the agent has only asked and received an answer for the first question, the guideline still applies - the agent has yet to ask about the size.
 
 Evaluate the actual meaning of the condition, not just keyword matches, and take the full context into account - including context variables, glossary terms, capabilities, and tool results. Do not consider the guideline applicable based solely on earlier parts of the conversation if the topic has since shifted and its action is not still in progress, even if the previous topic remains unresolved. If the conversation moves from a broader issue to a related sub-issue, the guideline remains applicable as long as it is relevant to that sub-issue; once the discussion has clearly moved on to an entirely different topic, it no longer applies.
-Record your applicability decision in the "is_relevant" field. If the guideline does not apply, set "is_relevant" to false and omit "distilled_action" entirely - there is nothing more to do.
+Record your applicability decision in the "is_relevant" field. "is_relevant" means this guideline contributes an actual instruction to the next response, so decide as follows:
+- If the guideline's condition does not apply, set "is_relevant" to false.
+- If the condition applies but there is genuinely nothing left to do right now - for example its action was already fully carried out earlier and has not arisen again for a new reason - also set "is_relevant" to false. There is no "relevant but nothing to do" state: if the guideline has nothing to contribute to the next response, it is not relevant.
+- Only when the condition applies AND there is something concrete to do now, set "is_relevant" to true - and then you MUST provide a non-empty "distilled_action".
+Before concluding that a step was already carried out, confirm it actually happened earlier in the conversation; if you are not sure it was completed, treat it as still needing doing. When "is_relevant" is false, omit "distilled_action" entirely.
 
-Distilling the action:
-If the guideline applies, recognize how its action should be carried out right now. A guideline's action is often broad: it may describe several different things to do across different situations, spell out a checklist, or be phrased generally enough that it could be applied in more than one way. Recognizing how the action currently applies means either:
-1. Picking the part of the action that is relevant to the current state of the conversation, when the action covers multiple situations; or
-2. Choosing how best to apply the action given the specific context of the conversation, when the action is more general.
+Distilling the guideline:
+If the guideline applies, work out which of its guidance is relevant right now. A guideline is often broad: its action and detailed instructions may lay out an ordered sequence of steps, a set of rules or constraints, plain information, or be phrased generally enough that it could be applied in more than one way - and may cover several different situations at once. Distill it down to only what bears on the current state of the conversation. Two shapes come up most:
+1. An ordered sequence of steps (a multi-step process or checklist): only the next step that still needs doing is relevant - return just that step, not the steps that come after it.
+2. A set of rules, constraints, or information that vary by situation: return every part that applies to the customer's current request, and leave out the parts that don't. Don't collapse several applicable rules down to just one of them.
+When the action is more general, choose how best to apply it given the specific context of the conversation.
 
-Some of the action may already have been taken, in full or in part, earlier in the conversation. In that case, output only the part of the action that still needs to be taken now. If the action was already fully taken and its condition has not arisen again for a new reason, there is nothing left to take. If the condition has arisen again for a new reason (a new or subtly different context), the action should be taken again for that new occurrence. Be conservative about repeating actions that deliver static, one-time information (e.g. "send our address"): only repeat them if the condition genuinely arose again.
+Some of the guidance may already have been carried out, in full or in part, earlier in the conversation. In that case, output only the part that still needs to be carried out now. If it was already fully carried out and its condition has not arisen again for a new reason, there is nothing left to do, so the guideline is not relevant (set "is_relevant" to false). If the condition has arisen again for a new reason (a new or subtly different context), the guidance should be applied again for that new occurrence. Be conservative about repeating guidance that delivers static, one-time information (e.g. "send our address"): only repeat it if the condition genuinely arose again.
 
 If a flow has returned to an earlier stage (e.g. the customer corrects something they said earlier), don't just take the step that literally follows the changed point. Skip any later steps whose information you already have and that is still valid, and jump forward to the next step that genuinely still needs doing.
 
-Prioritize choosing a single action. Even when the guideline lists many things to do, return only the one that is appropriate to take next - do not bundle together everything the guideline mentions. It is fine for a single action to ask for several details at once when they naturally belong together, but it should never overwhelm the customer with unrelated requests or with steps that aren't yet relevant. Record the chosen action in the "distilled_action" field.
+Be relevant-complete but selective: include everything that genuinely bears on the next response, and exclude everything that doesn't. Don't return a generic restatement of the action when the detailed instructions let you be specific; but equally, don't dump the whole guideline verbatim or bundle in steps and rules that aren't yet relevant, and never overwhelm the customer. When a single next step is all that applies, return just that step.
+
+Make the result STANDALONE. What you output is the only thing the agent will have when it writes its next response - the original guideline, its action, and its detailed instructions will NOT be available to it. So spell out the actual substance: state the specific rule, value, fact, or step in full. Never point at content the agent can no longer see - don't say things like "follow the policy", "apply the rules above", "as described in the guideline", or "check the details". State the rule itself rather than referring to it: write out what specifically should be said or done, not "tell the customer the rule".
+
+Carry through every concrete operative detail the guideline specifies for what you're surfacing - exact amounts, numbers, formulas, rates, thresholds, named tools, dates, and specific values. These are usually the whole point of the instruction, and the agent will have no way to recover them. When the guideline expresses a value as a formula (for example a fixed rate per unit) and the conversation supplies the inputs (for example the quantity), apply it and state the resulting figure, rather than collapsing it to a vague "an amount applies". Never paraphrase a specific value into a vague one, and never drop it. Record the result in the "distilled_action" field.
 
 The exact format of your response will be provided later in this prompt.
 """,
@@ -273,27 +331,7 @@ Examples of Guideline Distillations:
         )
 
         builder.add_agent_identity(context.agent)
-        builder.add_context_variables(context_variables)
-        builder.add_glossary(terms)
-        builder.add_capabilities_for_guideline_matching(capabilities)
         builder.add_customer_identity(context.customer, context.session)
-        builder.add_interaction_history(context.interaction.events)
-        builder.add_staged_tool_events(staged_events)
-
-        builder.add_section(
-            name=BuiltInSection.GUIDELINES,
-            template="""
-- Guideline: ###
-{guideline_text}
-###
-""",
-            props={
-                "guideline_text": _format_guideline(
-                    guideline.content.condition, guideline.content.action, tools
-                ),
-            },
-            status=SectionStatus.ACTIVE,
-        )
 
         builder.add_section(
             name="guideline-distiller-output-format",
@@ -310,19 +348,34 @@ OUTPUT FORMAT
             },
         )
 
+        builder.add_context_variables(context.state.context_variables)
+        builder.add_glossary(list(context.state.glossary_terms))
+        builder.add_capabilities_for_guideline_matching(context.state.capabilities)
+        builder.add_interaction_history(context.interaction.events)
+
         return builder
 
     def _format_output(self) -> str:
         result: dict[str, JSONSerializable] = {
             "reasoning": (
                 "<A brief explanation of whether the guideline currently applies and, "
-                "if so, which part of its action is relevant to the next agent response>"
+                "if so, which of its guidance is relevant to the next agent response>"
             ),
-            "is_relevant": "<BOOL indicating whether the guideline currently applies>",
+            "is_relevant": (
+                "<BOOL: true only if the guideline applies AND has a concrete instruction "
+                "to contribute to the next response; false otherwise (including when it "
+                "applies but its action was already fully carried out)>"
+            ),
             "distilled_action": (
-                "<Include only if is_relevant=True. The specific action that should be "
-                "taken next, extracted from the guideline's action. Omit this field "
-                "entirely if is_relevant=False>"
+                "<REQUIRED whenever is_relevant=True; omit ONLY when is_relevant=False. "
+                "A standalone, self-contained statement of the guidance relevant to the "
+                "next response, distilled from the guideline's action and detailed "
+                "instructions: the next step for a sequential action, or every applicable "
+                "rule/piece of information for a policy. Spell out the actual substance - "
+                "never refer to 'the policy', 'the rules', or anything the agent can no "
+                "longer see, and carry through every concrete operative detail (exact "
+                "amounts, numbers, formulas, rates, named tools, dates), applying any "
+                "formula to inputs the conversation supplies>"
             ),
         }
 
@@ -344,6 +397,7 @@ def _readable_tool_spec(tool_id: ToolId, tool: Tool) -> dict[str, JSONSerializab
 def _format_guideline(
     condition: str,
     action: Optional[str],
+    description: Optional[str],
     tools: Sequence[tuple[ToolId, Tool]] = (),
 ) -> str:
     # The action is optional and only present to contextualize the condition; omit it
@@ -351,6 +405,8 @@ def _format_guideline(
     text = f"Condition: {condition}."
     if action:
         text += f" Action: {action}"
+    if description:
+        text += f" Details: {description}"
     if tools:
         # Surface the tools attached to the action (description + arguments), so the
         # distiller knows what each tool does and can name it as the next step.
@@ -478,7 +534,8 @@ example_3_expected = GuidelineDistillSchema(
 
 
 # Shot 4: the guideline previously applied and its (static) action was already taken;
-# there is no new reason to retake it, so no further action is necessary.
+# there is no new reason to retake it. Nothing remains to be done, so the guideline is
+# NOT relevant (rather than relevant with an empty action).
 example_4_events = [
     _make_event("11", EventSource.CUSTOMER, "Hi, I need help changing the email on my account."),
     _make_event(
@@ -502,13 +559,12 @@ example_4_guideline = GuidelineContent(
 
 example_4_expected = GuidelineDistillSchema(
     reasoning=(
-        "The customer is still asking for account-related help, so the guideline applies. "
-        "However, they already provided their account ID earlier and it remains valid for "
-        "this request, so the action has already been taken and there is no new reason to "
-        "ask for it again."
+        "The customer is still asking for account-related help, but they already provided "
+        "their account ID earlier and it remains valid for this request, so the action has "
+        "already been carried out and there is no new reason to ask for it again. Nothing "
+        "remains to be done, so the guideline is not relevant."
     ),
-    is_relevant=True,
-    distilled_action="No further action necessary.",
+    is_relevant=False,
 )
 
 
@@ -588,6 +644,80 @@ example_6_expected = GuidelineDistillSchema(
 )
 
 
+# Shot 7: a policy expressed as a vague action plus detailed rules. The action only
+# points at the policy; the substance lives in the details. This is not a sequence of
+# steps, so the distiller must surface every rule that bears on the customer's request -
+# here two of the three - rather than picking a single next step.
+example_7_events = [
+    _make_event(
+        "11",
+        EventSource.CUSTOMER,
+        "I'd like to downgrade to the Basic plan. And if I change my mind, can I switch back later this month?",
+    ),
+]
+
+example_7_guideline = GuidelineContent(
+    condition="the customer wants to change their subscription plan",
+    action="follow the plan change policy",
+    description=(
+        "Changing a subscription plan:\n"
+        "- Upgrades take effect immediately.\n"
+        "- Downgrades take effect at the end of the current billing cycle.\n"
+        "- A plan can be changed at most once per billing cycle."
+    ),
+)
+
+example_7_expected = GuidelineDistillSchema(
+    reasoning=(
+        "The customer wants to downgrade and asks whether they can switch again later this "
+        "month, so the guideline applies. The downgrade-timing rule and the once-per-cycle "
+        "rule both bear on this request; the upgrade rule does not. Both relevant rules "
+        "should be surfaced, not just one."
+    ),
+    is_relevant=True,
+    distilled_action=(
+        "Let the customer know the downgrade takes effect at the end of the current billing "
+        "cycle, and that a plan can only be changed once per billing cycle (so they could not "
+        "switch again this month)."
+    ),
+)
+
+
+# Shot 8: the relevant rule carries a concrete operative detail - a per-guest rate. The
+# distilled action must carry the rate through AND apply it to the guest count from the
+# conversation, not abstract it into "a deposit is required".
+example_8_events = [
+    _make_event(
+        "11",
+        EventSource.CUSTOMER,
+        "I'd like to book catering for 8 guests for next Friday's event.",
+    ),
+]
+
+example_8_guideline = GuidelineContent(
+    condition="the customer wants to book catering",
+    action="follow the catering booking policy",
+    description=(
+        "Booking catering:\n"
+        "- A refundable deposit of $25 per guest is required to confirm the booking.\n"
+        "- Cancellations within 48 hours of the event forfeit the deposit."
+    ),
+)
+
+example_8_expected = GuidelineDistillSchema(
+    reasoning=(
+        "The customer wants to book catering for 8 guests, so the deposit rule applies. The "
+        "deposit is $25 per guest, which for 8 guests is $200 - that amount must be stated, "
+        "not abstracted away. The cancellation rule isn't raised yet, so it's left out."
+    ),
+    is_relevant=True,
+    distilled_action=(
+        "Tell the customer a refundable deposit of $25 per guest is required to confirm the "
+        "booking - $200 for the 8 guests."
+    ),
+)
+
+
 _baseline_shots: Sequence[GuidelineDistillationShot] = [
     GuidelineDistillationShot(
         description="",
@@ -624,6 +754,18 @@ _baseline_shots: Sequence[GuidelineDistillationShot] = [
         interaction_events=example_6_events,
         guideline=example_6_guideline,
         expected_result=example_6_expected,
+    ),
+    GuidelineDistillationShot(
+        description="",
+        interaction_events=example_7_events,
+        guideline=example_7_guideline,
+        expected_result=example_7_expected,
+    ),
+    GuidelineDistillationShot(
+        description="",
+        interaction_events=example_8_events,
+        guideline=example_8_guideline,
+        expected_result=example_8_expected,
     ),
 ]
 

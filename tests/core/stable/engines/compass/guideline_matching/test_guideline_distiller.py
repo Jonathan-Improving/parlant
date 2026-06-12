@@ -21,6 +21,7 @@ from lagom import Container
 from pytest import fixture
 
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
+from parlant.core.engines.compass.response_state import ResponseState
 
 from parlant.core.capabilities import Capability
 from parlant.core.common import JSONSerializable
@@ -109,6 +110,7 @@ async def base_test_that_a_guideline_is_distilled_correctly(
     expected_relevant: bool,
     expected_distilled_action: str | None = None,
     *,
+    description: str | None = None,
     agent_description: str | None = None,
     customer_name: str | None = None,
     tools: Sequence[tuple[ToolId, Tool]] = [],
@@ -123,22 +125,21 @@ async def base_test_that_a_guideline_is_distilled_correctly(
     - if it is relevant, its distilled action semantically matches
       ``expected_distilled_action`` (checked via ``nlp_test``).
     """
-    guideline = create_guideline(condition=condition, action=action)
+    guideline = create_guideline(condition=condition, action=action, description=description)
 
     agent = create_agent(description=agent_description) if agent_description else None
     customer = create_customer(name=customer_name) if customer_name else None
 
     context = create_engine_context(conversation=conversation, agent=agent, customer=customer)
-
-    result = await distiller.distill(
-        context,
-        [guideline],
-        tools={guideline.id: tools} if tools else {},
-        context_variables=context_variables,
-        terms=terms,
-        capabilities=capabilities,
-        staged_events=staged_events,
+    context.state = ResponseState(
+        context_variables=list(context_variables),
+        glossary_terms=set(terms),
+        capabilities=list(capabilities),
+        tool_events=list(staged_events),
+        tools_by_guideline={guideline.id: list(tools)} if tools else {},
     )
+
+    result = await distiller.distill(context, [guideline])
 
     assert len(result.distilled_guidelines) == 1
     distilled = result.distilled_guidelines[0]
@@ -1768,5 +1769,164 @@ async def test_that_a_workout_guideline_recommends_differently_when_the_goal_cha
         expected_distilled_action=(
             "recommend a muscle-building workout - such as progressive strength/resistance "
             "training - suited to the customer's new goal"
+        ),
+    )
+
+
+# --- Level 5: policy distillation (the substance lives in the description) -----
+#
+# These guidelines pair a vague action ("follow the policy") with a description that
+# carries the actual rules. Unlike a sequential journey, the description is a *set of
+# rules*, so the distiller must surface every rule that bears on the customer's current
+# request - not a single next step - while leaving out the rules that don't apply.
+
+
+_BAGGAGE_INSURANCE_CONDITION = "changing baggage or insurance on a reservation"
+_BAGGAGE_INSURANCE_ACTION = "follow the baggage and insurance change policy"
+_BAGGAGE_INSURANCE_DESCRIPTION = """\
+Change baggage and insurance:
+- The user can add but not remove checked bags.
+- The user cannot add insurance after initial booking.
+"""
+
+
+async def test_that_a_policy_guideline_surfaces_every_rule_relevant_to_the_request(
+    distiller: GuidelineDistiller,
+) -> None:
+    # The customer touches BOTH rules at once, so both are relevant and must be
+    # surfaced together - a single-next-action framing would drop one of them.
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        condition=_BAGGAGE_INSURANCE_CONDITION,
+        action=_BAGGAGE_INSURANCE_ACTION,
+        description=_BAGGAGE_INSURANCE_DESCRIPTION,
+        conversation=[
+            (
+                EventSource.CUSTOMER,
+                "I'd like to add a checked bag to my reservation, and also add travel "
+                "insurance while I'm at it.",
+            ),
+        ],
+        expected_relevant=True,
+        expected_distilled_action=(
+            "convey BOTH of the following: that a checked bag CAN be added, AND that "
+            "insurance CANNOT be added after the initial booking"
+        ),
+    )
+
+
+async def test_that_a_policy_guideline_surfaces_only_the_rule_for_a_baggage_removal_request(
+    distiller: GuidelineDistiller,
+) -> None:
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        condition=_BAGGAGE_INSURANCE_CONDITION,
+        action=_BAGGAGE_INSURANCE_ACTION,
+        description=_BAGGAGE_INSURANCE_DESCRIPTION,
+        conversation=[
+            (EventSource.CUSTOMER, "Can you remove one of the checked bags from my booking?"),
+        ],
+        expected_relevant=True,
+        expected_distilled_action=(
+            "tell the customer that checked bags cannot be removed (they can only be added)"
+        ),
+    )
+
+
+async def test_that_a_policy_guideline_surfaces_only_the_insurance_rule_for_an_insurance_request(
+    distiller: GuidelineDistiller,
+) -> None:
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        condition=_BAGGAGE_INSURANCE_CONDITION,
+        action=_BAGGAGE_INSURANCE_ACTION,
+        description=_BAGGAGE_INSURANCE_DESCRIPTION,
+        conversation=[
+            (EventSource.CUSTOMER, "I forgot to get insurance when I booked - can I add it now?"),
+        ],
+        expected_relevant=True,
+        expected_distilled_action=(
+            "tell the customer that insurance cannot be added after the initial booking"
+        ),
+    )
+
+
+# --- Level 6: gating guidelines whose precondition is already satisfied --------
+#
+# A "gating" guideline only requires collecting something before the real work. Once
+# that has actually been collected earlier in the conversation, nothing remains to do -
+# so it must come back NOT relevant, rather than relevant with an empty/"no further
+# action" result.
+
+
+_MODIFY_RESERVATION_CONDITION = "modifying a reservation"
+_MODIFY_RESERVATION_ACTION = "obtain the user id and reservation id before taking the action"
+_MODIFY_RESERVATION_DESCRIPTION = (
+    "First, you must obtain the user id and reservation id.\n"
+    "- The user must provide their user id.\n"
+    "- If the user doesn't know their reservation id, help locate it using available tools."
+)
+
+
+async def test_that_a_gating_guideline_is_not_relevant_once_its_preconditions_are_satisfied(
+    distiller: GuidelineDistiller,
+) -> None:
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        condition=_MODIFY_RESERVATION_CONDITION,
+        action=_MODIFY_RESERVATION_ACTION,
+        description=_MODIFY_RESERVATION_DESCRIPTION,
+        conversation=[
+            (EventSource.CUSTOMER, "I'd like to modify my reservation."),
+            (
+                EventSource.AI_AGENT,
+                "Happy to help. Could you give me your user ID and reservation ID?",
+            ),
+            (EventSource.CUSTOMER, "Sure - my user ID is U-4471 and the reservation ID is M05KNL."),
+            (
+                EventSource.AI_AGENT,
+                "Thanks, I've pulled up reservation M05KNL. What would you like to change?",
+            ),
+            (EventSource.CUSTOMER, "I'd like to add travel insurance to it."),
+        ],
+        expected_relevant=False,
+    )
+
+
+# --- Level 7: carrying concrete operative details (amounts/formulas) through ---
+#
+# When the relevant rule specifies a concrete value or formula (an amount, rate, etc.),
+# the distilled action must carry it through - and apply it to inputs the conversation
+# supplies - rather than abstracting it into a vague "there is a fee". Dropping the
+# number leaves the agent to invent one.
+
+
+_LATE_RETURN_CONDITION = "the customer asks about returning rented equipment late"
+_LATE_RETURN_ACTION = "follow the late return policy"
+_LATE_RETURN_DESCRIPTION = (
+    "Late returns:\n"
+    "- A late fee of $15 per day applies to each item returned after the due date.\n"
+    "- Items more than 14 days late are considered lost and billed at full replacement cost."
+)
+
+
+async def test_that_a_policy_guideline_carries_a_specific_fee_amount_into_the_distilled_action(
+    distiller: GuidelineDistiller,
+) -> None:
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        condition=_LATE_RETURN_CONDITION,
+        action=_LATE_RETURN_ACTION,
+        description=_LATE_RETURN_DESCRIPTION,
+        conversation=[
+            (
+                EventSource.CUSTOMER,
+                "I think I'll end up returning the projector about 3 days late - what happens then?",
+            ),
+        ],
+        expected_relevant=True,
+        expected_distilled_action=(
+            "state the late fee of $15 per day, applied to the projector being 3 days late "
+            "(i.e. $45) - the specific $15/day rate must appear, not a vague 'a late fee applies'"
         ),
     )

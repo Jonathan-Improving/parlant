@@ -50,11 +50,23 @@ class ResponseState:
     available_tools: list[Tool] = field(default_factory=list)
     tool_ids_by_name: dict[str, ToolId] = field(default_factory=dict)  # to run a tool by its name
 
+    # Per-session nonce minted by the engine (see CompassEngine._resolve_cache_nonce).
+    # Matching components fold it into their provider-cache key so a turn's
+    # `cache: load` finds the prefix stored by the previous turn's `cache: store`,
+    # while keeping the key decoupled from (and rotatable independently of) the
+    # session id.
+    cache_nonce: str = ""
+
     # Per-turn signals the matcher precomputes (once) so its per-guideline strategy
     # selection can stay synchronous: guidelines that carry tools, and guidelines
     # that participate in a dependency relationship.
     guideline_ids_with_tools: set[GuidelineId] = field(default_factory=set)
     guideline_ids_with_dependencies: set[GuidelineId] = field(default_factory=set)
+
+    # Tools attached to a guideline's action (e.g. a journey distilled into a
+    # guideline carries the tools of its tool-using steps). Read by the distiller
+    # to surface what each tool does; empty for guidelines without attached tools.
+    tools_by_guideline: dict[GuidelineId, list[tuple[ToolId, Tool]]] = field(default_factory=dict)
 
     # TODO: Remove what isn't needed
     context_variables: list[tuple[ContextVariable, ContextVariableValue]] = field(

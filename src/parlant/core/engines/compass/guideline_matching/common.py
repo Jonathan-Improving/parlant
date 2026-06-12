@@ -1,0 +1,58 @@
+# Copyright 2026 Emcie Co Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Helpers shared by the per-guideline matching components (ranker, distiller),
+which evaluate one guideline per prompt and fan out concurrently."""
+
+from typing import Sequence
+
+from parlant.core.agents import Effort
+from parlant.core.engines.compass.response_state import EngineContext
+from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+
+
+def reasoning_effort_for(context: EngineContext) -> str:
+    """Map the agent's configured effort to a model ``reasoning_effort`` hint."""
+    match context.agent.effort:
+        case Effort.MIN:
+            return "minimal"
+        case Effort.LOW:
+            return "minimal"
+        case Effort.MEDIUM:
+            return "low"
+        case Effort.HIGH:
+            return "low"
+        case Effort.MAX:
+            return "medium"
+
+
+def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo:
+    """Aggregate usage across the per-guideline requests of a fan-out: tokens are
+    summed, duration is the max (the requests run concurrently, so it reflects
+    wall-clock, not total work), and cached_input_tokens (in ``extra``, possibly
+    absent) is summed with a 0 default."""
+    return GenerationInfo(
+        schema_name=infos[0].schema_name,
+        model=infos[0].model,
+        duration=max(info.duration for info in infos),
+        usage=UsageInfo(
+            input_tokens=sum(info.usage.input_tokens for info in infos),
+            output_tokens=sum(info.usage.output_tokens for info in infos),
+            extra={
+                "cached_input_tokens": sum(
+                    int((info.usage.extra or {}).get("cached_input_tokens", 0)) for info in infos
+                )
+            },
+        ),
+    )

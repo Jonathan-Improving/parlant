@@ -26,11 +26,15 @@ from parlant.core.engines.alpha.prompt_builder import (
     PromptBuilder,
     SectionStatus,
 )
+from parlant.core.engines.compass.guideline_matching.common import (
+    aggregate_generation_info,
+    reasoning_effort_for,
+)
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
-from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.sessions import Event, EventId, EventKind, EventSource
 from parlant.core.shots import Shot, ShotCollection
 from parlant.core.tracer import Tracer
@@ -81,12 +85,10 @@ class GuidelineRanker:
         logger: Logger,
         tracer: Tracer,
         schematic_generator: SchematicGenerator[GuidelineRankSchema],
-        include_tldr: bool = False,
     ) -> None:
         self._logger = logger
         self._tracer = tracer
         self._schematic_generator = schematic_generator
-        self._include_tldr = include_tldr
 
     async def rank(
         self,
@@ -115,8 +117,21 @@ class GuidelineRanker:
 
             return GuidelineRankingResult(
                 ranked_guidelines=[ranked for ranked, _ in results],
-                generation_info=_aggregate_generation_info([info for _, info in results]),
+                generation_info=aggregate_generation_info([info for _, info in results]),
             )
+
+    def _should_include_tldr(self, context: EngineContext) -> bool:
+        match context.agent.effort:
+            case Effort.MIN:
+                return False
+            case Effort.LOW:
+                return False
+            case Effort.MEDIUM:
+                return True
+            case Effort.HIGH:
+                return True
+            case Effort.MAX:
+                return True
 
     async def _rank_guideline(
         self,
@@ -128,7 +143,7 @@ class GuidelineRanker:
         inference = await self._schematic_generator.generate(
             prompt=prompt,
             hints={
-                "reasoning_effort": self._get_reasoning_effort(context),
+                "reasoning_effort": reasoning_effort_for(context),
                 "cache": {"action": "load", "key": self._cache_key(context)},
             },
         )
@@ -149,23 +164,11 @@ class GuidelineRanker:
         )
 
     def _cache_key(self, context: EngineContext) -> str:
-        # Namespace the provider cache per session AND component, so components that
-        # cache concurrently (e.g. within a matching batch) never clobber a shared
-        # session-keyed entry. store (prefill) and load (rank) must use the same key.
-        return f"{context.session.id}.guideline-ranker"
-
-    def _get_reasoning_effort(self, context: EngineContext) -> str:
-        match context.agent.effort:
-            case Effort.MIN:
-                return "minimal"
-            case Effort.LOW:
-                return "minimal"
-            case Effort.MEDIUM:
-                return "minimal"
-            case Effort.HIGH:
-                return "low"
-            case Effort.MAX:
-                return "medium"
+        # Namespace the provider cache per session+nonce AND component, so components
+        # that cache concurrently (e.g. within a matching batch) never clobber a shared
+        # entry. The nonce (minted in CompassEngine.initialize, shared across the
+        # session's turns) is stable across the store (prefill) / load (rank) pair.
+        return f"{context.session.id}.{context.state.cache_nonce}.guideline-ranker"
 
     async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the ranker's shared prompt prefix.
@@ -184,7 +187,7 @@ class GuidelineRanker:
                 inference = await self._schematic_generator.generate(
                     prompt=prompt,
                     hints={
-                        "reasoning_effort": self._get_reasoning_effort(context),
+                        "reasoning_effort": reasoning_effort_for(context),
                         "cache": {"action": "store", "key": self._cache_key(context)},
                     },
                 )
@@ -196,12 +199,13 @@ class GuidelineRanker:
     async def shots(self) -> Sequence[GuidelineRankingShot]:
         return await shot_collection.list()
 
-    def _format_shots(self, shots: Sequence[GuidelineRankingShot]) -> str:
+    def _format_shots(self, context: EngineContext, shots: Sequence[GuidelineRankingShot]) -> str:
         return "\n".join(
-            f"Example #{i}: ###\n{self._format_shot(shot)}" for i, shot in enumerate(shots, start=1)
+            f"Example #{i}: ###\n{self._format_shot(context, shot)}"
+            for i, shot in enumerate(shots, start=1)
         )
 
-    def _format_shot(self, shot: GuidelineRankingShot) -> str:
+    def _format_shot(self, context: EngineContext, shot: GuidelineRankingShot) -> str:
         def adapt_event(e: Event) -> JSONSerializable:
             source_map: dict[EventSource, str] = {
                 EventSource.CUSTOMER: "user",
@@ -233,7 +237,7 @@ class GuidelineRanker:
 """
 
         expected_result = shot.expected_result.model_dump(mode="json")
-        if not self._include_tldr or expected_result.get("tldr") is None:
+        if not self._should_include_tldr(context) or expected_result.get("tldr") is None:
             expected_result.pop("tldr", None)
 
         formatted_shot += f"""
@@ -333,7 +337,7 @@ Examples of Guideline Ranking Evaluations:
 {formatted_shots}
 """,
             props={
-                "formatted_shots": self._format_shots(shots),
+                "formatted_shots": self._format_shots(context, shots),
                 "shots": shots,
             },
         )
@@ -348,7 +352,7 @@ Examples of Guideline Ranking Evaluations:
         # function-calling - ignore this harmlessly.)
         json_only_note = (
             ""
-            if self._include_tldr
+            if self._should_include_tldr(context)
             else "\nRespond with ONLY the JSON object above - no explanation, reasoning, or other text."
         )
 
@@ -364,7 +368,7 @@ OUTPUT FORMAT
 {json_only_note}
 """,
             props={
-                "result_structure_text": self._format_output(),
+                "result_structure_text": self._format_output(context),
                 "json_only_note": json_only_note,
             },
         )
@@ -379,10 +383,10 @@ OUTPUT FORMAT
 
         return builder
 
-    def _format_output(self) -> str:
+    def _format_output(self, context: EngineContext) -> str:
         result: dict[str, JSONSerializable] = {}
 
-        if self._include_tldr:
+        if self._should_include_tldr(context):
             result["tldr"] = (
                 "<A brief, one-line summary of why the guideline's condition is or "
                 "isn't relevant to the most recent state of the interaction>"
@@ -393,27 +397,6 @@ OUTPUT FORMAT
         )
 
         return json.dumps(result, indent=4)
-
-
-def _aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo:
-    # All requests use the same schema/model; sum the token cost across them.
-    # Duration is the max (the requests run concurrently, so it reflects wall-clock,
-    # not total work). cached_input_tokens lives in `extra` and may be absent on some
-    # infos, so default each to 0 before summing.
-    return GenerationInfo(
-        schema_name=infos[0].schema_name,
-        model=infos[0].model,
-        duration=max(info.duration for info in infos),
-        usage=UsageInfo(
-            input_tokens=sum(info.usage.input_tokens for info in infos),
-            output_tokens=sum(info.usage.output_tokens for info in infos),
-            extra={
-                "cached_input_tokens": sum(
-                    int((info.usage.extra or {}).get("cached_input_tokens", 0)) for info in infos
-                )
-            },
-        ),
-    )
 
 
 def _format_guideline(condition: str, action: str | None, description: str | None = None) -> str:

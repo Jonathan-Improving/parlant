@@ -28,6 +28,7 @@ from parlant.core.engines.guideline_matcher_registry import GuidelineMatcherRegi
 from parlant.core.engines.compass.guideline_matching.guideline_function_matcher import (
     GuidelineFunctionMatcher,
 )
+from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.response_state import EngineContext
@@ -42,6 +43,8 @@ from parlant.core.relationships import (
 from parlant.core.sessions import ToolEventData
 from parlant.core.tags import TagId
 from parlant.core.tools import Tool, ToolId, ToolRelevanceResult
+
+_GUIDELINE_IS_COMPLEX: dict[GuidelineId, bool] = {}
 
 
 class MatcherStrategy(IntEnum):
@@ -70,6 +73,7 @@ class Matcher:
         logger: Logger,
         guideline_recaller: GuidelineRecaller,
         guideline_ranker: GuidelineRanker,
+        guideline_distiller: GuidelineDistiller,
         guideline_function_matcher: GuidelineFunctionMatcher,
         matcher_registry: GuidelineMatcherRegistry,
         relationship_store: RelationshipStore,
@@ -78,6 +82,7 @@ class Matcher:
         self._logger = logger
         self._guideline_recaller = guideline_recaller
         self._guideline_ranker = guideline_ranker
+        self._guideline_distiller = guideline_distiller
         self._guideline_function_matcher = guideline_function_matcher
         self._matcher_registry = matcher_registry
         self._relationship_store = relationship_store
@@ -97,9 +102,12 @@ class Matcher:
         await self._select_tools(context)
 
     async def prefill(self, context: EngineContext) -> None:
-        """Warm the guideline ranker's shared-prompt cache so its per-guideline
-        fan-out hits it. See :meth:`GuidelineRanker.prefill`."""
-        await self._guideline_ranker.prefill(context)
+        """Warm the ranker's and distiller's shared-prompt caches so their
+        per-guideline fan-outs hit them. See :meth:`GuidelineRanker.prefill`."""
+        await safe_gather(
+            self._guideline_ranker.prefill(context),
+            self._guideline_distiller.prefill(context),
+        )
 
     # --- guideline matching ---
 
@@ -126,7 +134,18 @@ class Matcher:
         await self._record(context, matches, append=True)
 
     def _get_strategy(self, context: EngineContext, guideline: Guideline) -> MatcherStrategy:
-        return MatcherStrategy.RANK  # FIXME
+        def is_complex(g: Guideline) -> bool:
+            if (is_complex := _GUIDELINE_IS_COMPLEX.get(g.id)) is not None:
+                return is_complex
+
+            condition_len = len(g.content.condition) if g.content.condition else 0
+            action_len = len(g.content.action) if g.content.action else 0
+            description_len = len(g.content.description) if g.content.description else 0
+
+            result = (condition_len + action_len + description_len) >= 150
+            _GUIDELINE_IS_COMPLEX[g.id] = result
+            return result
+
         strategy = MatcherStrategy.RECALL
 
         match context.agent.effort:
@@ -143,15 +162,23 @@ class Matcher:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.RANK
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.DISTILL
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if is_complex(guideline)
+                            else MatcherStrategy.RANK
+                        )
             case Effort.MEDIUM:
                 match guideline.criticality:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RANK
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if is_complex(guideline)
+                            else MatcherStrategy.RANK
+                        )
                     case Criticality.HIGH:
                         strategy = MatcherStrategy.DISTILL
             case Effort.HIGH:
@@ -159,7 +186,11 @@ class Matcher:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RANK
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RANK
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if is_complex(guideline)
+                            else MatcherStrategy.RANK
+                        )
                     case Criticality.HIGH:
                         strategy = MatcherStrategy.DISTILL
             case Effort.MAX:
@@ -278,16 +309,11 @@ class Matcher:
                 case MatcherStrategy.DISTILL:
                     distill_batch.append(guideline)
 
-        if distill_batch:
-            # Distillation isn't wired yet; don't silently drop these guidelines.
-            self._logger.warning(
-                f"Distillation is not wired yet; skipping {len(distill_batch)} guideline(s)."
-            )
-
-        code_matches, recalled, ranked = await safe_gather(
+        code_matches, recalled, ranked, distilled = await safe_gather(
             self._guideline_function_matcher.match(context, code_batch),
             self._guideline_recaller.recall(context, recall_batch),
             self._guideline_ranker.rank(context, rank_batch),
+            self._guideline_distiller.distill(context, distill_batch),
         )
 
         ranking_results = StringIO()
@@ -296,21 +322,50 @@ class Matcher:
             ranking_results.write(f"Usage: {ranked.generation_info}\n")
 
         if ranked.ranked_guidelines:
-            for rank_result in ranked.ranked_guidelines:
+            for idx, rank_result in enumerate(ranked.ranked_guidelines, start=1):
                 g = rank_result.guideline
 
-                if g.content.condition:
-                    ranking_results.write(f"Condition: {g.content.condition}\n")
-                if g.content.action:
-                    ranking_results.write(f"Action: {g.content.action}\n")
-
                 ranking_results.write(
-                    f"  Score: {rank_result.score:.2f} ({'Relevant' if rank_result.is_relevant else 'Not Relevant'})\n"
+                    f"### {idx} [Score: {rank_result.score:.2f} ({'Relevant' if rank_result.is_relevant else 'Not Relevant'})]\n\n"
                 )
-                ranking_results.write(f"  Reasoning: {rank_result.reasoning}\n\n")
+                if g.content.condition:
+                    ranking_results.write(f"    Condition: {g.content.condition}\n")
+                if g.content.action:
+                    ranking_results.write(f"    Action: {g.content.action}\n")
+                ranking_results.write(f"    Reasoning: {rank_result.reasoning}\n\n")
 
             self._logger.debug(
                 f"{self.__class__.__name__} guideline ranking results:\n{ranking_results.getvalue()}"
+            )
+
+        distillation_results = StringIO()
+
+        if distilled.generation_info:
+            distillation_results.write(f"Usage: {distilled.generation_info}\n")
+
+        if distilled.distilled_guidelines:
+            for idx, distill_result in enumerate(distilled.distilled_guidelines, start=1):
+                g = distill_result.guideline
+
+                distillation_results.write(
+                    f"### {idx} [{'Relevant' if distill_result.is_relevant else 'Not Relevant'}]\n\n"
+                )
+                if g.content.condition:
+                    distillation_results.write(f"    Condition: {g.content.condition}\n")
+                if g.content.action:
+                    distillation_results.write(f"    Action: {g.content.action}\n")
+                if g.content.description:
+                    distillation_results.write(
+                        f"    Description: {g.content.description.strip()}\n"
+                    )
+                if distill_result.distilled_action:
+                    distillation_results.write(
+                        f"    Distilled Action: {distill_result.distilled_action.strip()}\n"
+                    )
+                distillation_results.write(f"    Reasoning: {distill_result.reasoning.strip()}\n\n")
+
+            self._logger.debug(
+                f"{self.__class__.__name__} guideline distillation results:\n{distillation_results.getvalue()}"
             )
 
         matches = list(code_matches)
@@ -330,6 +385,15 @@ class Matcher:
             )
             for rk in ranked.ranked_guidelines
             if rk.is_relevant
+        ]
+        matches += [
+            GuidelineMatch(
+                guideline=dg.guideline,
+                rationale=dg.reasoning,
+                metadata={"distilled_action": dg.distilled_action} if dg.distilled_action else {},
+            )
+            for dg in distilled.distilled_guidelines
+            if dg.is_relevant
         ]
         return matches
 
