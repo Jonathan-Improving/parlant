@@ -1932,6 +1932,67 @@ async def test_that_a_policy_guideline_carries_a_specific_fee_amount_into_the_di
     )
 
 
+# --- Level 8: don't volunteer constraints the customer hasn't solicited --------
+#
+# A policy may contain prohibitions/limitations whose preconditions happen to hold, yet
+# the customer hasn't asked about or attempted the restricted action. The distiller must
+# NOT proactively surface such a restriction - it should distill only the guidance
+# relevant to what the customer is actually doing. (Constraints are applied reactively,
+# when the customer hits them, not announced up front.)
+
+
+_PHONE_PLAN_CONDITION = "changing a phone plan"
+_PHONE_PLAN_ACTION = "follow the plan change policy"
+_PHONE_PLAN_DESCRIPTION = (
+    "Changing a phone plan:\n"
+    "- Promotional plans cannot be downgraded before the 12-month term ends.\n"
+    "- Standard plans can be changed at any time, without changing the phone number.\n"
+    "- Some perks can be kept, but their pricing won't be re-evaluated at current rates.\n"
+    "- The system does not enforce these rules for you, so you must make sure the rules "
+    "apply before making any change!"
+)
+
+
+async def test_that_the_distiller_does_not_volunteer_an_unsolicited_restriction(
+    distiller: GuidelineDistiller,
+) -> None:
+    # The customer is on a promotional plan (so the downgrade prohibition's precondition
+    # holds) and wants to make a change, but has NOT asked about or attempted a
+    # downgrade. The distiller must help with what they're actually doing, not lead with
+    # the unsolicited "promotional plans cannot be downgraded" restriction.
+    guideline = create_guideline(
+        condition=_PHONE_PLAN_CONDITION,
+        action=_PHONE_PLAN_ACTION,
+        description=_PHONE_PLAN_DESCRIPTION,
+    )
+    context = create_engine_context(
+        conversation=[
+            (
+                EventSource.CUSTOMER,
+                "Hi, I'm on the promotional plan and I'd like to make a change to it - can you help?",
+            ),
+        ]
+    )
+    context.state = ResponseState()
+
+    result = await distiller.distill(context, [guideline])
+    distilled = result.distilled_guidelines[0]
+
+    # Either the guideline contributes nothing concrete yet (not relevant), or it moves
+    # things forward (e.g. asks what change they want) - but EITHER WAY it must not
+    # volunteer the unsolicited downgrade restriction. The restriction should only
+    # surface once the customer actually attempts a downgrade.
+    if distilled.is_relevant:
+        assert distilled.distilled_action is not None
+        assert not await nlp_test(
+            context=distilled.distilled_action,
+            condition=(
+                "The text proactively states or warns that promotional plans cannot be "
+                "downgraded (i.e. it volunteers a downgrade restriction)"
+            ),
+        ), f"distiller volunteered an unsolicited restriction: '{distilled.distilled_action}'"
+
+
 # --- Prompt construction: the agent's reasoning-so-far is fed in (cache-safe) ---
 
 
