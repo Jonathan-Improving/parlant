@@ -36,7 +36,7 @@ from parlant.core.tracer import Tracer
 class LoopJob:
     context: EngineContext
     system_instructions: str
-    turn_instructions: Callable[[EngineContext], Awaitable[str]] | None = None
+    step_instructions: Callable[[EngineContext], Awaitable[str]] | None = None
     model_size: ModelSize = ModelSize.MEDIUM
     reasoning_config: ReasoningConfig | None = None
 

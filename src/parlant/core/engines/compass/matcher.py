@@ -174,11 +174,7 @@ class Matcher:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = (
-                            MatcherStrategy.DISTILL
-                            if is_complex(guideline)
-                            else MatcherStrategy.RANK
-                        )
+                        strategy = MatcherStrategy.RECALL
                     case Criticality.HIGH:
                         strategy = MatcherStrategy.DISTILL
             case Effort.HIGH:
@@ -186,11 +182,7 @@ class Matcher:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RANK
                     case Criticality.MEDIUM:
-                        strategy = (
-                            MatcherStrategy.DISTILL
-                            if is_complex(guideline)
-                            else MatcherStrategy.RANK
-                        )
+                        strategy = MatcherStrategy.RANK
                     case Criticality.HIGH:
                         strategy = MatcherStrategy.DISTILL
             case Effort.MAX:
@@ -198,9 +190,17 @@ class Matcher:
                     case Criticality.LOW:
                         strategy = MatcherStrategy.RANK
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.DISTILL
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if is_complex(guideline)
+                            else MatcherStrategy.RANK
+                        )
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.DISTILL
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if is_complex(guideline)
+                            else MatcherStrategy.RANK
+                        )
 
         if strategy < MatcherStrategy.RANK:
             # There are some special conditions under which we want
@@ -283,6 +283,9 @@ class Matcher:
         matcher, regardless of strategy — an explicit matcher is authoritative. The
         rest are bucketed by `_get_strategy`.
         """
+        # Low-criticality guidelines are always included in the system instructions
+        guidelines = [g for g in guidelines if g.criticality != Criticality.LOW]
+
         if not guidelines:
             return []
 

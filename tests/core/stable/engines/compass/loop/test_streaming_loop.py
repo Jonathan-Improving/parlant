@@ -61,7 +61,7 @@ async def test_that_turn_instructions_are_placed_before_the_last_customer_messag
     job = LoopJob(
         context=context,
         system_instructions="SYSTEM_INSTRUCTIONS",
-        turn_instructions=turn_instructions,
+        step_instructions=turn_instructions,
     )
 
     history, instructions_index = await _make_streaming_loop()._build_history(job)

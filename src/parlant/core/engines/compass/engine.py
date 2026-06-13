@@ -155,7 +155,7 @@ class CompassEngine(Engine):
             # Initial match before responding: both the composition-mode decision
             # and the guideline-gated retriever hook (fired at the start of the
             # response loop) need the matches already in place.
-            await self._refresh_state(engine_context)
+            await self._matcher.fill(engine_context)
 
             # The responder re-invokes _refresh_state when (re)building the turn
             # instructions after each step, to reevaluate guidelines gated on the
@@ -241,9 +241,6 @@ class CompassEngine(Engine):
         )
 
     async def _refresh_state(self, engine_context: EngineContext) -> None:
-        # Called by the responder when (re)building the turn instructions: the
-        # initial fill, then an update (reevaluation) after each subsequent step.
-        if not engine_context.state.iterations:
-            await self._matcher.fill(engine_context)
-        else:
+        # Called by the responder when (re)building the turn instructions
+        if engine_context.state.iterations:
             await self._matcher.update(engine_context)

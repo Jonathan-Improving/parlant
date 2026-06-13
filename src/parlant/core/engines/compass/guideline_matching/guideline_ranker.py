@@ -164,6 +164,24 @@ class GuidelineRanker:
             inference.info,
         )
 
+    def _build_reasoning(self, output: GuidelineRankSchema) -> str:
+        if output.tldr:
+            match output.s:
+                case s if s < 1:
+                    return f"NOT relevant. {output.tldr}"
+                case 1 | 2:
+                    return f"NOT relevant. {output.tldr}"
+                case 3:
+                    return f"Possibly relevant. {output.tldr}"
+                case 4:
+                    return f"Quite relevant. {output.tldr}"
+                case 5:
+                    return f"Very relevant. {output.tldr}"
+                case _:
+                    return f"Relevance score overflow: {output.s * 2} out of 10. {output.tldr}"
+        else:
+            return f"This guideline ranked {output.s * 2} out of 10 in relevance to your next response."
+
     def _cache_key(self, context: EngineContext) -> str:
         # Namespace the provider cache per session+nonce AND component, so components
         # that cache concurrently (e.g. within a matching batch) never clobber a shared

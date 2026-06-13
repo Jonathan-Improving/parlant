@@ -34,21 +34,32 @@ def _tool(name: str, description: str, *, consequential: bool = False) -> Tool:
     )
 
 
-def _match(
-    condition: str, action: str, criticality: Criticality = Criticality.MEDIUM
-) -> GuidelineMatch:
+def _guideline(
+    condition: str,
+    action: str,
+    *,
+    description: str | None = None,
+    criticality: Criticality = Criticality.MEDIUM,
+) -> Guideline:
     now = datetime.now(timezone.utc)
-    guideline = Guideline(
+    return Guideline(
         id=GuidelineId(generate_id()),
         creation_utc=now,
         modified_utc=now,
-        content=GuidelineContent(condition=condition, action=action),
+        content=GuidelineContent(condition=condition, action=action, description=description),
         enabled=True,
         tags=[],
         metadata={},
         criticality=criticality,
     )
-    return GuidelineMatch(guideline=guideline, rationale="because")
+
+
+def _match(
+    condition: str, action: str, criticality: Criticality = Criticality.MEDIUM
+) -> GuidelineMatch:
+    return GuidelineMatch(
+        guideline=_guideline(condition, action, criticality=criticality), rationale="because"
+    )
 
 
 # ───────────────────── guideline instructions vs. list ──────────────────────
@@ -145,6 +156,37 @@ def test_that_matched_low_criticality_guidelines_list_the_principles() -> None:
     prompt = PromptBuilder().add_matched_low_criticality_guidelines([match], {}, guidelines).build()
 
     assert "keep it brief" in prompt
+
+
+# ─────────────────────── system-wide instructions ───────────────────────────
+
+
+def test_that_system_wide_guidelines_list_all_instructions_with_their_details() -> None:
+    g1 = _guideline("the customer asks about toppings", "list the available toppings")
+    g2 = _guideline(
+        "the customer wants a refund",
+        "follow the refund policy",
+        description="Refunds are issued within 30 days of purchase.",
+    )
+
+    prompt = PromptBuilder().add_system_wide_guidelines([g1, g2]).build()
+
+    # Every instruction is listed (not just a matched subset), with its condition,
+    # action, and details.
+    assert "Instruction #1)" in prompt
+    assert "Instruction #2)" in prompt
+    assert "list the available toppings" in prompt
+    assert "follow the refund policy" in prompt
+    assert "Refunds are issued within 30 days of purchase." in prompt
+    # Referred to as "instructions", never "guidelines".
+    assert "instruction" in prompt.lower()
+    assert "guideline" not in prompt.lower()
+
+
+def test_that_system_wide_guidelines_render_nothing_when_there_are_no_instructions() -> None:
+    prompt = PromptBuilder().add_system_wide_guidelines([]).build()
+
+    assert "Instruction #" not in prompt
 
 
 # ─────────────────────────── tool descriptions ──────────────────────────────

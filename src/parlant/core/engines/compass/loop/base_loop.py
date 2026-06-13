@@ -184,10 +184,10 @@ class BaseLoop(Loop):
             # the step history is preserved.
             if (
                 state.instructions_index is not None
-                and job.turn_instructions is not None
+                and job.step_instructions is not None
                 and job.context.state.iterations
             ):
-                refreshed = await job.turn_instructions(job.context)
+                refreshed = await job.step_instructions(job.context)
                 state.history[state.instructions_index] = self._instructions_message(
                     refreshed, job.context.session.id
                 )
@@ -616,8 +616,8 @@ class BaseLoop(Loop):
 
         instructions_index: int | None = None
 
-        if include_turn_instructions and job.turn_instructions:
-            turn_instructions = await job.turn_instructions(job.context)
+        if include_turn_instructions and job.step_instructions:
+            turn_instructions = await job.step_instructions(job.context)
 
             # Place the instructions immediately BEFORE the last customer message
             # rather than at the very end. Ending the prompt on an imperative note
