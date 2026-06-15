@@ -16,20 +16,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from parlant.core.engines.alpha.hooks import EngineHooks
-from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.engines.compass.tool_runner import ToolRunner
-from parlant.core.loggers import Logger
-from parlant.core.meter import Meter
 from parlant.core.nlp.common import ModelSize
 from parlant.core.nlp.react import (
-    ReactGenerator,
     ReasoningConfig,
     StepResult,
     Usage,
 )
-from parlant.core.tracer import Tracer
 
 
 @dataclass(frozen=True)
@@ -61,24 +54,6 @@ class LoopResult:
 class Loop(ABC):
     """Base class for the agentic generation loop, which generates a response message
     based on the provided system prompt."""
-
-    def __init__(
-        self,
-        logger: Logger,
-        tracer: Tracer,
-        meter: Meter,
-        optimization_policy: OptimizationPolicy,
-        react: ReactGenerator,
-        tool_runner: ToolRunner,
-        hooks: EngineHooks,
-    ) -> None:
-        self._logger = logger
-        self._tracer = tracer
-        self._meter = meter
-        self._optimization_policy = optimization_policy
-        self._react = react
-        self._tool_runner = tool_runner
-        self._hooks = hooks
 
     @abstractmethod
     async def prefill(self, job: LoopJob) -> Usage:

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 from collections import defaultdict
+from collections.abc import Set
 from dataclasses import dataclass
 import dataclasses
 from enum import Enum, auto
@@ -29,7 +30,7 @@ from parlant.core.agents import Agent
 from parlant.core.capabilities import Capability
 from parlant.core.common import Criticality, JSONSerializable
 from parlant.core.context_variables import ContextVariable, ContextVariableValue
-from parlant.core.customers import Customer
+from parlant.core.customers import Customer, CustomerStore
 from parlant.core.engines.alpha.guideline_matching.generic.common import (
     GuidelineInternalRepresentation,
     internal_representation,
@@ -315,17 +316,31 @@ The following is a description of your background and personality: ###
         customer: Customer,
         session: Session,
     ) -> PromptBuilder:
-        self.add_section(
-            name=BuiltInSection.CUSTOMER_IDENTITY,
-            template="""
+        if customer.id == CustomerStore.GUEST_ID:
+            self.add_section(
+                name=BuiltInSection.CUSTOMER_IDENTITY,
+                template="""\
+## The user you're interacting with is not authenticated
+We do not yet know their identity
+    """,
+                props={
+                    "customer_name": customer.name,
+                    "session_id": session.id,
+                },
+                status=SectionStatus.ACTIVE,
+            )
+        else:
+            self.add_section(
+                name=BuiltInSection.CUSTOMER_IDENTITY,
+                template="""\
 ## The user you're interacting with is called {customer_name}.
 """,
-            props={
-                "customer_name": customer.name,
-                "session_id": session.id,
-            },
-            status=SectionStatus.ACTIVE,
-        )
+                props={
+                    "customer_name": customer.name,
+                    "session_id": session.id,
+                },
+                status=SectionStatus.ACTIVE,
+            )
 
         return self
 
@@ -446,18 +461,30 @@ The following is information that you're given about the user and context of the
         terms: Sequence[Term],
     ) -> PromptBuilder:
         if terms:
-            terms_string = "\n".join(f"{i}) {repr(t)}" for i, t in enumerate(terms, start=1))
+            terms_string = ""
+
+            for t in terms:
+                terms_string += f"### {t.name}\n\n"
+
+                if t.synonyms:
+                    terms_string += f"Synonyms: {', '.join(t.synonyms)}\n\n"
+
+                terms_string += f"{t.description}\n\n"
 
             self.add_section(
                 name=BuiltInSection.GLOSSARY,
                 template="""
+## DOMAIN GLOSSARY
+
 The following is a glossary of our domain.
+
 Understanding these terms, as they apply to the domain, is critical for your task.
 When encountering any of these terms, prioritize the interpretation provided here over any definitions you may already know.
+
 Please be tolerant of possible typos by the user with regards to these terms,
-and let the user know if/when you assume they meant a term by their typo: ###
+and let the user know if/when you assume they meant a term by their typo:
+
 {terms_string}
-###
 """,  # noqa
                 props={"terms_string": terms_string},
                 status=SectionStatus.ACTIVE,
@@ -699,7 +726,7 @@ These guidelines have already been pre-filtered based on the interaction's conte
         self.add_section(
             name=BuiltInSection.GUIDELINE_INSTRUCTIONS,
             template="""
-## DOMAIN INSTRUCTIONS
+# DOMAIN INSTRUCTIONS
 
 When crafting your reply, follow the behavioral instructions (provided toward the end of the prompt) to the extent that they are (still) relevant to the current state of the interaction. The instructions to keep in mind, if any, will be provided to you in a separate instruction later in the conversation.
 
@@ -723,27 +750,57 @@ In all other situations, you are expected to follow the instructions when and as
         )
         return self
 
-    def add_system_wide_guidelines(self, guidelines: Sequence[Guideline]) -> PromptBuilder:
-        listed = sorted((g for g in guidelines if g.content.action), key=lambda g: g.id)
+    def add_system_wide_guidelines(
+        self,
+        guidelines: Sequence[Guideline],
+        tools_by_guideline: Mapping[GuidelineId, Set[tuple[ToolId, Tool]]],
+    ) -> PromptBuilder:
+        # Titled instructions first; within each group ordered by id, so the rendered
+        # list is deterministic (cache-stable) and the cached prefix stays byte-stable.
+        listed = sorted(
+            guidelines,
+            key=lambda g: (0 if g.title else 1, g.id),
+        )
+
         if not listed:
             return self
 
         instruction_texts = []
+
         for i, g in enumerate(listed, start=1):
-            if g.content.condition:
-                text = f"### Instruction #{i}: When {g.content.condition}, then {g.content.action}"
+            if g.title:
+                text = f"### Instruction #{i}: {g.title}"
+            elif g.content.condition:
+                if g.content.action:
+                    text = f"### Instruction #{i}: When {g.content.condition}, then {g.content.action}\n"
+                elif g.content.description or (g.id in tools_by_guideline):
+                    text = f"### Instruction #{i}: When {g.content.condition}...\n"
+                elif g.id not in tools_by_guideline:
+                    # Pure condition guideline - probably used for relationships
+                    # and not meant to be included in the prompt. Skip it.
+                    continue
             else:
-                text = f"### Instruction #{i}: {g.content.action}"
+                text = f"### Instruction #{i}: {g.content.action}\n"
+
             if g.content.description:
-                text += f"\nDetails:\n{g.content.description.strip()}"
+                text += f"{g.content.description.strip()}"
+            elif g.id not in tools_by_guideline:
+                text += "\nDetails:\n[None]"
+            else:
+                text += "\nConsider using the associated tool(s)."
+
+            if tools_by_guideline.get(g.id):
+                tool_names = ", ".join(t.name for _, t in tools_by_guideline[g.id])
+                text += f"\nAssociated tool(s): {tool_names}"
+
             instruction_texts.append(text)
 
         self.add_section(
             name=BuiltInSection.SYSTEM_WIDE_GUIDELINES,
             template="""
-## DOMAIN INSTRUCTIONS
+# DOMAIN INSTRUCTIONS
 
-The following are all the behavioral instructions and policies that govern your conduct in this domain, each written as "When <condition>, then <action>". Keep every one of them in mind. Later in the conversation you will be reminded which of these are deemed most relevant to the current moment.
+The following are all the behavioral instructions and policies that govern your conduct in this domain. Keep every one of them in mind as the conversation progresses.
 
 {instruction_list}
 """,
@@ -772,21 +829,17 @@ The following are all the behavioral instructions and policies that govern your 
             if guidelines[match.guideline.id].content.action
             and not match.guideline.criticality == Criticality.LOW
         ]
+        # Titled instructions first, preserving the original order within each group.
+        all_matches = sorted(all_matches, key=lambda m: 0 if m.guideline.title else 1)
 
         if not all_matches:
-            self.add_section(
-                name=BuiltInSection.GUIDELINE_LIST,
-                template="""
-No special behavioral instructions are particularly relevant right now. Follow your general instructions.
-""",
-                status=SectionStatus.PASSIVE,
-            )
             return self
 
         guideline_texts = []
 
         for i, p in enumerate(all_matches, start=1):
-            tool_ids = tool_enabled.get(p, [])
+            # tool_ids = tool_enabled.get(p, [])
+            _ = i
 
             if self._is_short_tool_related_condition(guidelines[p.guideline.id]):
                 # If the guideline is short and only has a condition, and is only relevant due to tool availability, we can assume it's meant to be a short instruction related to the tool, and we can save space in the prompt by putting it in the tool description section instead of the guideline list section.
@@ -794,49 +847,56 @@ No special behavioral instructions are particularly relevant right now. Follow y
 
             if guidelines[p.guideline.id].content.action:
                 if guidelines[p.guideline.id].title:
-                    guideline = f"### Instruction #{i}: {guidelines[p.guideline.id].title}"
+                    guideline = (
+                        f'### Review the instructions under "{guidelines[p.guideline.id].title}"'
+                    )
                 else:
                     if guidelines[p.guideline.id].content.condition:
-                        guideline = f"### Instruction #{i}: When {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
+                        guideline = f"### Remember, when {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
                     else:
-                        guideline = (
-                            f"### Instruction #{i}: {guidelines[p.guideline.id].content.action}"
-                        )
+                        guideline = f"### Remember: {guidelines[p.guideline.id].content.action}"
 
-                if distilled_action := str(p.metadata.get("distilled_action", "")):
-                    guideline += f"\nDetails:\n:{distilled_action.strip()}"
-                elif description := guidelines[p.guideline.id].content.description:
-                    guideline += f"\nDetails:\n{description.strip()}"
+                # TODO: Consider whether we really need to provide the details,
+                # and not simply a reminder of the instructions themselves.
+                # This adds a lot of tokens and potentially over-focuses
+                # the model on details in disconnect from the broader context.
+                if guidelines[p.guideline.id].criticality == Criticality.HIGH:
+                    if distilled_action := str(p.metadata.get("distilled_action", "")):
+                        guideline += f"\n{distilled_action.strip()}"
+                    elif description := guidelines[p.guideline.id].content.description:
+                        guideline += f"\n{description.strip()}"
 
-                if p.rationale:
-                    guideline += f"\n(Note: {p.rationale})"
+                    guideline += "\nIMPORTANT: Please go back and reason (internally) about the original content of this instruction to the letter before proceeding."
+                elif guidelines[p.guideline.id].criticality == Criticality.MEDIUM:
+                    if guidelines[p.guideline.id].content.description:
+                        guideline += "\nPlease review the original content of this instruction before proceeding."
 
-                if tool_ids:
-                    tool_names = ", ".join(tool_id.tool_name for tool_id in tool_ids)
-                    guideline += f"\nAssociated tool(s): {tool_names}"
+                # TODO: Consider whether we need the rationale.
+                # Since it's a step-based reminder, the rationale might be
+                # overly focused on the guideline itself without considering
+                # other guidelines or the broader context...
+                #
+                # if p.rationale:
+                #    guideline += f"\n(Note: {p.rationale})"
+
+                # TODO: Consider whether we need to mention the associated tools.
+                # It may cause the model to overly obsess over running them.
+                #
+                # if tool_ids:
+                #    tool_names = ", ".join(tool_id.tool_name for tool_id in tool_ids)
+                #    guideline += f"\nAssociated tool(s): {tool_names}"
 
                 guideline_texts.append(guideline)
 
-        guideline_list = "\n\n".join(guideline_texts)
+        guideline_list = "\n".join(guideline_texts)
 
         guideline_block = """\
-Here are some particularly relevant behavioral instructions for our domain, each written as "When <condition>, then <action>". These are STANDING rules, not commands to act on right now: a instruction appearing here does NOT necessarily mean you must apply it again in this message.
-
-This whole assessment is INTERNAL. Your reply must contain ONLY your message to the user — never narrate or preface it, and never mention instructions, considerations, or that you are checking anything. In particular, do NOT write things like "Let me check the instructions before I reply" or "Based on the instructions, ...". Just write the reply itself.
-
-IMPORTANT: Consider, before applying any instruction below, what has already happened in the conversation. Do not obsessively repeat instructions you've already followed sufficiently in the conversation so far:
-- If you have ALREADY satisfied a instruction's action, and nothing new has happened to re-trigger its condition, it is DONE. Do NOT restate it, re-offer it, or remind the user of it. Repeating a instruction you've already fulfilled reads as obsessive and is a mistake — skip it silently and move the conversation forward.
-- Apply a instruction only when its condition is currently (and still) active AND its action has not already been addressed earlier in the conversation.
-- For agent-intention instructions ("When you are likely/about to ..."), apply them only if you are actually about to produce a message that activates the condition.
-
-When unsure whether you've already covered a instruction, prefer NOT repeating it.
-
-Here are the instructions that are currently most relevant:
+This is a gentle reminder to review your instructions again, particularly with respect to the following instructions.
 """
 
         if guideline_list:
             guideline_block += """
-## Instructions
+## Instruction reminders
 
 {guideline_list}
 """
@@ -889,14 +949,6 @@ The following are "principles" - these are instructions that are considered less
         consequential_note = "If a tool has a significant, real-world effect, it will be marked with CONSEQUENTIAL. In that case, be careful before running it. Read its description carefully and, when appropriate, confirm with the user before going ahead and performing its action."
 
         if not tools:
-            self.add_section(
-                name=BuiltInSection.TOOL_DESCRIPTIONS,
-                template="""
-No tools have been specifically highlighted to be used in processing your current response.
-But if you find that using any of the tools you are aware of would be *obviously* and *directly* helpful for fulfilling the user's request or adhering to a guideline, feel free to use them as you see fit.
-""",
-                status=SectionStatus.PASSIVE,
-            )
             return self
 
         guidelines_per_tools: dict[ToolId, set[Guideline]] = defaultdict(set)
@@ -906,9 +958,28 @@ But if you find that using any of the tools you are aware of would be *obviously
                 if self._is_short_tool_related_condition(match.guideline):
                     guidelines_per_tools[tool_id].add(match.guideline)
 
+        tools_for_high_criticality_guidelines: set[ToolId] = set()
+
+        for match, match_tools in guidelines.items():
+            if match.guideline.criticality == Criticality.HIGH:
+                tools_for_high_criticality_guidelines.update(match_tools)
+
+        high_criticality_or_consequential_tools: set[ToolId] = set()
+
+        for tool_id, tool in tools.items():
+            if tool.consequential:
+                high_criticality_or_consequential_tools.add(tool_id)
+            elif tool_id in tools_for_high_criticality_guidelines:
+                high_criticality_or_consequential_tools.add(tool_id)
+            else:
+                pass  # Do not include this tool in the reminder
+
         tool_lines = []
 
         for tool_id, tool in tools.items():
+            if tool_id not in high_criticality_or_consequential_tools:
+                continue
+
             if tool.consequential:
                 any_consequential = True
                 line = f"- {tool.name} - CONSEQUENTIAL\n"
@@ -917,33 +988,51 @@ But if you find that using any of the tools you are aware of would be *obviously
                 line = f"- {tool.name}"
 
             if associated_guidelines := guidelines_per_tools.get(tool_id, set()):
-                line += f"\n  (Consider using {tool.name}: "
-                line += "; ".join(f"when {g.content.condition}" for g in associated_guidelines)
+                line += " (Potential relevance: "
+                line += "; or ".join(f"when {g.content.condition}" for g in associated_guidelines)
                 line += ")"
 
             tool_lines.append(line)
 
-        self.add_section(
-            name=BuiltInSection.TOOL_DESCRIPTIONS,
-            template="""
+        preface = """\
 ## TOOL REFRESHER
 
-For this turn of the interaction, some tools have been identified as relevant to remind you about. You are not required to use any of them; use a tool only when it is actually useful for the current response. You MAY also use any other tools that you are aware of in processing your current response, other than the ones listed below, if appropriate under certain corner cases.
-
 IMPORTANT: When running tools, consider *very carefully* whether it is required to issue **multiple calls to the same tool** - for example, if there are *different contexts* and arguments that need to be managed across different calls. This is especially important to *respect user intent when handling sensitive operations across multiple contexts* simultaneously.
+"""
+
+        if tool_lines:
+            self.add_section(
+                name=BuiltInSection.TOOL_DESCRIPTIONS,
+                template="""\
+{preface}
 
 {consequential_note}
+
+For this turn of the interaction, some tools have been identified as relevant to remind you about. You are not required to use any of them; use a tool only when it is actually useful for the current response. You MAY also use any other tools that you are aware of in processing your current response, other than the ones listed below, if appropriate under certain corner cases.
 
 ### Tools
 
 {tool_list}
 """,
-            props={
-                "tool_list": "\n".join(tool_lines),
-                "consequential_note": consequential_note if any_consequential else "",
-            },
-            status=SectionStatus.ACTIVE,
-        )
+                props={
+                    "preface": preface,
+                    "tool_list": "\n".join(tool_lines),
+                    "consequential_note": consequential_note if any_consequential else "",
+                },
+                status=SectionStatus.ACTIVE,
+            )
+        else:
+            self.add_section(
+                name=BuiltInSection.TOOL_DESCRIPTIONS,
+                template="""\
+{preface}
+""",
+                props={
+                    "preface": preface,
+                },
+                status=SectionStatus.ACTIVE,
+            )
+
         return self
 
     def add_low_criticality_guidelines(

@@ -51,6 +51,7 @@ class MatcherStrategy(IntEnum):
     """How much effort to spend deciding whether a guideline applies, cheapest to
     most thorough."""
 
+    NONE = auto()
     RECALL = auto()
     RANK = auto()
     DISTILL = auto()
@@ -67,6 +68,7 @@ class Matcher:
     """
 
     _MAX_AVAILABLE_TOOLS = 16
+    _MAX_GLOSSARY_TERMS = 30
 
     def __init__(
         self,
@@ -89,9 +91,15 @@ class Matcher:
         self._entity_queries = entity_queries
 
     async def fill(self, context: EngineContext) -> None:
-        """Initial preparation: match all usable guidelines and rank the agent's
-        tool pool (independent, so in parallel), then select the offered tools."""
-        await safe_gather(self._match(context), self._rank_tool_pool(context))
+        """Initial preparation: match all usable guidelines, rank the agent's tool
+        pool, and load the relevant glossary (all independent, so in parallel), then
+        select the offered tools."""
+        await self._load_tools_by_guideline(context)
+        await safe_gather(
+            self._match(context),
+            self._rank_tool_pool(context),
+            self._load_glossary(context),
+        )
         await self._select_tools(context)
 
     async def update(self, context: EngineContext) -> None:
@@ -134,7 +142,7 @@ class Matcher:
         await self._record(context, matches, append=True)
 
     def _get_strategy(self, context: EngineContext, guideline: Guideline) -> MatcherStrategy:
-        def is_complex(g: Guideline) -> bool:
+        def needs_distillation(g: Guideline) -> bool:
             if (is_complex := _GUIDELINE_IS_COMPLEX.get(g.id)) is not None:
                 return is_complex
 
@@ -142,7 +150,7 @@ class Matcher:
             action_len = len(g.content.action) if g.content.action else 0
             description_len = len(g.content.description) if g.content.description else 0
 
-            result = (condition_len + action_len + description_len) >= 150
+            result = (condition_len + action_len + description_len) >= 300
             _GUIDELINE_IS_COMPLEX[g.id] = result
             return result
 
@@ -152,55 +160,47 @@ class Matcher:
             case Effort.MIN:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.NONE
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.NONE
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.RANK
+                        strategy = MatcherStrategy.NONE
             case Effort.LOW:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.NONE
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RANK
+                        strategy = MatcherStrategy.NONE
                     case Criticality.HIGH:
-                        strategy = (
-                            MatcherStrategy.DISTILL
-                            if is_complex(guideline)
-                            else MatcherStrategy.RANK
-                        )
+                        strategy = MatcherStrategy.NONE
             case Effort.MEDIUM:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.NONE
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = MatcherStrategy.NONE
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.DISTILL
+                        strategy = MatcherStrategy.RANK
             case Effort.HIGH:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RANK
+                        strategy = MatcherStrategy.NONE
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RANK
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if needs_distillation(guideline)
+                            else MatcherStrategy.RANK
+                        )
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.DISTILL
+                        strategy = MatcherStrategy.RANK
             case Effort.MAX:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RANK
+                        strategy = MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = (
-                            MatcherStrategy.DISTILL
-                            if is_complex(guideline)
-                            else MatcherStrategy.RANK
-                        )
+                        strategy = MatcherStrategy.RANK
                     case Criticality.HIGH:
-                        strategy = (
-                            MatcherStrategy.DISTILL
-                            if is_complex(guideline)
-                            else MatcherStrategy.RANK
-                        )
+                        strategy = MatcherStrategy.RANK
 
         if strategy < MatcherStrategy.RANK:
             # There are some special conditions under which we want
@@ -505,7 +505,7 @@ class Matcher:
                 for tool_id in tool_ids
             )
         )
-        context.state.matched_tools = await self._resolve_tool_ids(tool_ids)
+        context.state.matched_tools = await self._resolve_tools_by_id(tool_ids)
 
     async def _rank_tool_pool(self, context: EngineContext) -> None:
         # Rank the agent's candidate tools against the agent description + the
@@ -563,6 +563,23 @@ class Matcher:
         messages = [f"{m.source}: {m.content}" for m in context.interaction.messages]
         return f"{context.agent.description or ''}\n\n{messages}"
 
+    # --- glossary ---
+
+    async def _load_glossary(self, context: EngineContext) -> None:
+        # Load the glossary terms most relevant to the conversation so far (capped at
+        # _MAX_GLOSSARY_TERMS) into the state, so the responder can surface them in its
+        # (cached) system instructions. Loaded once here, not per response step.
+        messages = [f"{m.source}: {m.content}" for m in context.interaction.messages]
+        if not messages:
+            return  # nothing to rank against yet (e.g. the initialize-time warm-up)
+
+        terms = await self._entity_queries.find_glossary_terms_for_context(
+            context.agent.id,
+            query=str(messages),
+            max_terms=self._MAX_GLOSSARY_TERMS,
+        )
+        context.state.glossary_terms = set(terms)
+
     async def _agent_candidate_tool_ids(self, context: EngineContext) -> set[ToolId]:
         guideline_ids = {g.id for g in context.state.usable_guidelines}
         return {
@@ -571,15 +588,32 @@ class Matcher:
             if association.guideline_id in guideline_ids
         }
 
-    async def _resolve_tool_ids(self, tool_ids: Iterable[ToolId]) -> list[Tool]:
-        """Resolve ToolIds into their full Tool definitions, skipping any that
-        fail to resolve."""
+    async def _load_tools_by_guideline(self, context: EngineContext) -> None:
+        # Load the tools associated with each guideline into the state, so they can be
+        # looked up when a guideline matches. Loaded once here, not per response step.
+        context.state.tools_by_guideline = defaultdict(set)
+
+        guideline_tool_associations = await self._entity_queries.find_guideline_tool_associations()
+
+        for association in guideline_tool_associations:
+            if tool := await self._resolve_tool_by_id(association.tool_id):
+                context.state.tools_by_guideline[association.guideline_id].add(
+                    (association.tool_id, tool)
+                )
+
+    async def _resolve_tools_by_id(self, tool_ids: Iterable[ToolId]) -> list[Tool]:
         tools: list[Tool] = []
+
         for tool_id in tool_ids:
-            try:
-                service = await self._entity_queries.read_tool_service(tool_id.service_name)
-                tools.append(await service.read_tool(tool_id.tool_name))
-            except Exception as e:
-                self._logger.warning(f"Failed to resolve tool {tool_id.to_string()}: {e}")
+            if tool := await self._resolve_tool_by_id(tool_id):
+                tools.append(tool)
 
         return tools
+
+    async def _resolve_tool_by_id(self, tool_id: ToolId) -> Tool | None:
+        try:
+            service = await self._entity_queries.read_tool_service(tool_id.service_name)
+            return await service.read_tool(tool_id.tool_name)
+        except Exception as e:
+            self._logger.warning(f"Failed to resolve tool {tool_id.to_string()}: {e}")
+            return None

@@ -39,6 +39,7 @@ def _make_streaming_loop() -> StreamingLoop:
         optimization_policy=cast(Any, None),
         react=cast(Any, None),
         tool_runner=cast(Any, None),
+        reviewer=cast(Any, None),
         hooks=EngineHooks(),
     )
 

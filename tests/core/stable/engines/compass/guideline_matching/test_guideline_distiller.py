@@ -136,7 +136,7 @@ async def base_test_that_a_guideline_is_distilled_correctly(
         glossary_terms=set(terms),
         capabilities=list(capabilities),
         tool_events=list(staged_events),
-        tools_by_guideline={guideline.id: list(tools)} if tools else {},
+        tools_by_guideline={guideline.id: set(tools)} if tools else {},
     )
 
     result = await distiller.distill(context, [guideline])

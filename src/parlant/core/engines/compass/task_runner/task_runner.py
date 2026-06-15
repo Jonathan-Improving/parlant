@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from itertools import chain
 
 from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
+from parlant.core.common import Criticality
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import LoopJob
@@ -209,7 +210,9 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         # How/when to follow guidelines lives in the (cached) system instructions;
         # the matched guidelines themselves are listed per turn (see
         # _build_turn_instructions).
-        builder.add_low_criticality_guideline_instructions()
+        builder.add_low_criticality_guideline_instructions(
+            [g for g in context.state.usable_guidelines if g.criticality == Criticality.LOW]
+        )
         builder.add_guideline_instructions()
 
         builder.add_section(
@@ -239,17 +242,18 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         builder.add_capabilities_for_message_generation(context.state.capabilities)
         # The how/when explanation is in the system instructions; here we list
         # the matched guidelines themselves (turn-level).
-        builder.add_matched_low_criticality_guidelines(
-            context.state.ordinary_guideline_matches,
-            context.state.tool_enabled_guideline_matches,
-            guidelines,
-        )
         builder.add_matched_guidelines(
             context.state.ordinary_guideline_matches,
             context.state.tool_enabled_guideline_matches,
             guidelines,
         )
-        builder.add_tool_descriptions(context.state.matched_tools)
+        builder.add_tool_descriptions(
+            {
+                context.state.tool_ids_by_name[tool.name]: tool
+                for tool in context.state.matched_tools
+            },
+            context.state.tool_enabled_guideline_matches,
+        )
 
         builder.add_section(
             name="taskrunner-reminder",

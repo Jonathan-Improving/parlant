@@ -79,7 +79,7 @@ class GuidelineRanker:
     later stages of message generation.
     """
 
-    RELEVANCE_SCORE_THRESHOLD = 3
+    RELEVANCE_SCORE_THRESHOLD = 4
 
     def __init__(
         self,

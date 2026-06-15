@@ -64,6 +64,10 @@ class ResponseState:
     # initial match (no steps have run yet).
     reasoning_steps: list[str] = field(default_factory=list)
 
+    # Reviewer-provided replacement reasoning when pending tool calls would breach
+    # policy. Empty means no breach was found, or the reviewer has not run yet.
+    step_notes: str = ""
+
     # Per-turn signals the matcher precomputes (once) so its per-guideline strategy
     # selection can stay synchronous: guidelines that carry tools, and guidelines
     # that participate in a dependency relationship.
@@ -73,7 +77,7 @@ class ResponseState:
     # Tools attached to a guideline's action (e.g. a journey distilled into a
     # guideline carries the tools of its tool-using steps). Read by the distiller
     # to surface what each tool does; empty for guidelines without attached tools.
-    tools_by_guideline: dict[GuidelineId, list[tuple[ToolId, Tool]]] = field(default_factory=dict)
+    tools_by_guideline: dict[GuidelineId, set[tuple[ToolId, Tool]]] = field(default_factory=dict)
 
     # TODO: Remove what isn't needed
     context_variables: list[tuple[ContextVariable, ContextVariableValue]] = field(

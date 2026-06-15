@@ -157,6 +157,14 @@ class CompassEngine(Engine):
             # response loop) need the matches already in place.
             await self._matcher.fill(engine_context)
 
+            # TODO
+            # await self._task_runner.run(
+            #    Task(
+            #        context=engine_context,
+            #        instructions="",
+            #    )
+            # )
+
             # The responder re-invokes _refresh_state when (re)building the turn
             # instructions after each step, to reevaluate guidelines gated on the
             # tools that just ran.

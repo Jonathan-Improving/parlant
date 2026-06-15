@@ -346,6 +346,7 @@ class EntityQueries:
         self,
         agent_id: AgentId,
         query: str,
+        max_terms: int = 20,
     ) -> Sequence[Term]:
         agent_terms = await self._glossary_store.list_terms(
             tags=[Tag.for_agent_id(agent_id).id],
@@ -358,7 +359,9 @@ class EntityQueries:
 
         all_terms = set(chain(agent_terms, global_terms, glossary_for_agent_tags))
 
-        return await self._glossary_store.find_relevant_terms(query, list(all_terms))
+        return await self._glossary_store.find_relevant_terms(
+            query, list(all_terms), max_terms=max_terms
+        )
 
     async def read_tool_service(
         self,

@@ -17,18 +17,27 @@ from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from io import StringIO
+from itertools import chain
+import json
 from typing import Any, Optional, cast
 
+from parlant.core.agents import Effort
 from parlant.core.async_utils import safe_gather
-from parlant.core.common import JSONSerializable
+from parlant.core.common import Criticality, JSONSerializable
 from parlant.core.emissions import MessageEventHandle, StatusEventHandle
+from parlant.core.engines.alpha.hooks import EngineHooks
+from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.alpha.tool_calling.tool_caller import ToolInsights
 from parlant.core.engines.compass.response_state import EngineContext, IterationState
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob, LoopResult
+from parlant.core.engines.compass.tool_runner import ToolRunner
+from parlant.core.loggers import Logger
+from parlant.core.meter import Meter
 from parlant.core.nlp.common import ModelSize
 from parlant.core.nlp.react import (
     Message,
     ReactError,
+    ReactGenerator,
     ReasoningDelta,
     Role,
     StepCompleted,
@@ -53,6 +62,8 @@ from parlant.core.sessions import (
     ToolEventData,
 )
 from parlant.core.tools import ToolResult
+from parlant.core.tracer import Tracer
+from parlant.core.engines.compass.reviewer import Reviewer
 
 
 # Key under which the provider's opaque tool-call replay blob is stored in a tool
@@ -135,6 +146,10 @@ class _LoopState:
     steps: list[StepResult] = field(default_factory=list)
 
 
+class _SemanticFailure(Exception):
+    pass
+
+
 class BaseLoop(Loop):
     """Shared agentic generation loop. Streaming vs blocking output differs only in
     how the assistant message is surfaced to the session, so that single step —
@@ -144,7 +159,27 @@ class BaseLoop(Loop):
 
     # Retry a step on a transient ReactError, but only before any event has been
     # emitted (a stream can't be replayed mid-flight). Waits between attempts.
-    _STREAM_RETRY_WAITS = (1.0, 4.0)
+    _STREAM_RETRY_WAITS = (2.0, 8.0, 32.0)
+
+    def __init__(
+        self,
+        logger: Logger,
+        tracer: Tracer,
+        meter: Meter,
+        optimization_policy: OptimizationPolicy,
+        react: ReactGenerator,
+        tool_runner: ToolRunner,
+        reviewer: Reviewer,
+        hooks: EngineHooks,
+    ) -> None:
+        self._logger = logger
+        self._tracer = tracer
+        self._meter = meter
+        self._optimization_policy = optimization_policy
+        self._react = react
+        self._tool_runner = tool_runner
+        self._reviewer = reviewer
+        self._hooks = hooks
 
     async def prefill(self, job: LoopJob) -> Usage:
         self._logger.debug(f"Prefilling job for session {job.context.session.id}")
@@ -187,18 +222,13 @@ class BaseLoop(Loop):
                 and job.step_instructions is not None
                 and job.context.state.iterations
             ):
-                refreshed = await job.step_instructions(job.context)
-                state.history[state.instructions_index] = self._instructions_message(
-                    refreshed, job.context.session.id
-                )
-
-            await self._run_step(job, state)
-
-            # Surface each step's reasoning onto the shared state so the next step's
-            # matching (ranker, distiller) is aware of what the agent has concluded.
-            job.context.state.reasoning_steps = [
-                s.message.reasoning for s in state.steps if s.message.reasoning
-            ]
+                for _ in range(self._max_semantic_failures(job)):
+                    try:
+                        await self._run_step(job, state)
+                    except _SemanticFailure:
+                        continue
+                    else:
+                        break
 
             job.context.state.iterations.append(
                 IterationState(
@@ -215,6 +245,9 @@ class BaseLoop(Loop):
                 # Maybe we can control max turns in the generator itself?
                 # Maybe we should just add to the prompt that we've failed to
                 # converge to a desired outcome and are now stopping.
+                self._logger.error(
+                    f"Maximum engine iterations reached without preparing a response; forcing completion. Reasoning: \n{json.dumps(job.context.state.reasoning_steps, indent=2)}"
+                )
                 job.context.state.prepared_to_respond = True
 
         await job.context.session_event_emitter.emit_status_event(
@@ -226,12 +259,30 @@ class BaseLoop(Loop):
 
         return LoopResult(job=job, steps=state.steps)
 
+    def _max_semantic_failures(self, job: LoopJob) -> int:
+        """The number of times a step can be restarted due to a reviewer-provided
+        policy-adjusted reasoning before we give up and propagate the failure."""
+        match job.context.agent.effort:
+            case Effort.MIN:
+                return 1
+            case Effort.LOW:
+                return 3
+            case Effort.MEDIUM:
+                return 5
+            case Effort.HIGH:
+                return 8
+            case Effort.MAX:
+                return 10
+
     async def _run_step(self, job: LoopJob, state: _LoopState) -> None:
         """Run one react step, processing each event. A transient ReactError is
         retried — but only while NO event has been produced yet: once events have
         been emitted, the stream can't be replayed (it would re-emit chunks and
         re-run side effects), so the error propagates. The transient errors we
         retry are raised when the stream is opened, before any event."""
+
+        await self._update_step_instructions(job, state)
+
         for attempt in range(len(self._STREAM_RETRY_WAITS) + 1):
             produced = False
             try:
@@ -247,6 +298,7 @@ class BaseLoop(Loop):
                     await self._update_reasoning(job.context, state)
                     await self._update_tool_calls(job.context, state)
                     await self._update_message(job.context, state)
+
                 return
             except ReactError as exc:
                 if not exc.retryable or produced or attempt == len(self._STREAM_RETRY_WAITS):
@@ -303,14 +355,18 @@ class BaseLoop(Loop):
                             chunks=state.reasoning_chunks,
                         )
                     )
-            case StepCompleted(result=result) if state.reasoning_handle is not None:
-                await state.reasoning_handle.update(
-                    StatusEventData(
-                        status="processing",
-                        message=result.message.reasoning,
-                        chunks=[*state.reasoning_chunks, None],
+            case StepCompleted(result=result):
+                if result.message.reasoning:
+                    context.state.reasoning_steps.append(result.message.reasoning)
+
+                if state.reasoning_handle is not None:
+                    await state.reasoning_handle.update(
+                        StatusEventData(
+                            status="processing",
+                            message=result.message.reasoning,
+                            chunks=[*state.reasoning_chunks, None],
+                        )
                     )
-                )
 
                 state.reasoning_buffer = None
                 state.reasoning_chunks = []
@@ -319,6 +375,9 @@ class BaseLoop(Loop):
                 state.reasoning_handle is not None
             ):  # In case reasoning is followed by events other than StepCompletion
                 assert state.reasoning_buffer is not None
+
+                if state.reasoning_buffer.getvalue().strip():
+                    context.state.reasoning_steps.append(state.reasoning_buffer.getvalue())
 
                 await state.reasoning_handle.update(
                     StatusEventData(
@@ -343,6 +402,25 @@ class BaseLoop(Loop):
 
                 state.in_the_middle_of_running_tools = True
             case StepCompleted(result=result) if result.needs_tools:
+                adjusted_reasoning = await self._review_tool_calls(
+                    context,
+                    result.message.reasoning,
+                    result.tool_calls,
+                )
+
+                if adjusted_reasoning:
+                    context.state.step_notes = adjusted_reasoning
+
+                    # Was reasoning emitted by the model for this step?
+                    if result.message.reasoning:
+                        # We need to replace this step's reasoning in the state
+                        assert len(context.state.reasoning_steps) > 0
+                        context.state.reasoning_steps[-1] = adjusted_reasoning
+
+                    raise _SemanticFailure()  # Restart the step with the adjusted reasoning in place
+                else:
+                    context.state.step_notes = ""
+
                 if len(result.tool_calls) == 1:
                     await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
@@ -360,6 +438,48 @@ class BaseLoop(Loop):
                 await self._run_tool_calls(context, state, result.tool_calls)
             case _:
                 state.in_the_middle_of_running_tools = False
+
+    async def _review_tool_calls(
+        self,
+        context: EngineContext,
+        reasoning: str,
+        tool_calls: Sequence[ToolCallPart],
+    ) -> str | None:
+        if context.agent.effort in (Effort.MIN, Effort.LOW):
+            # Skip the review for minimal-effort agents
+            return None
+
+        if (context.agent.effort == Effort.MEDIUM) and (
+            not self._has_matched_high_criticality_guidelines(context)
+        ):
+            # For non-high-effort agents, skip the review
+            # if no high-criticality guidelines were matched
+            return None
+
+        await context.session_event_emitter.emit_status_event(
+            trace_id=context.tracer.trace_id,
+            data=StatusEventData(status="processing", message="Reviewing tool use"),
+        )
+
+        review_result = await self._reviewer.review_tool_calls(
+            context,
+            reasoning,
+            tool_calls,
+        )
+
+        if review_result.breaches:
+            return review_result.adjusted_reasoning
+
+        return None
+
+    def _has_matched_high_criticality_guidelines(self, context: EngineContext) -> bool:
+        return any(
+            match.guideline.criticality == Criticality.HIGH
+            for match in chain(
+                context.state.ordinary_guideline_matches,
+                context.state.tool_enabled_guideline_matches.keys(),
+            )
+        )
 
     async def _run_tool_calls(
         self,
@@ -641,11 +761,40 @@ class BaseLoop(Loop):
             parts=[
                 TextPart(
                     text=f"""\
-[The following is context about the current state of the conversation — the guidelines, glossary, and tools relevant to it. Treat it as background that informs your next reply; it is NOT itself a message addressed to you, so never respond to it, acknowledge it, or refer to it.]:
+[The following is notes and context about the current state of the conversation — the guidelines, glossary, and tools relevant to it. Treat it as background that informs your next reply; it is NOT itself a message addressed to you, so never respond to it, acknowledge it, or refer to it.]:
 {turn_instructions}"""
                 )
             ],
         )
+
+    async def _update_step_instructions(
+        self,
+        job: LoopJob,
+        state: _LoopState,
+    ) -> None:
+        if job.step_instructions is not None:
+            instructions = await job.step_instructions(job.context)
+        else:
+            instructions = ""
+
+        if job.context.state.step_notes:
+            instructions += (
+                "\n\n### IMPORTANT: Please mind the following notes for your next step:\n\n"
+                + job.context.state.step_notes
+            )
+
+        if state.instructions_index is not None:
+            refreshed_instructions = self._instructions_message(
+                instructions,
+                job.context.session.id,
+            )
+
+            if state.history[state.instructions_index].text != refreshed_instructions.text:
+                self._logger.debug(
+                    f"{self.__class__.__name__} updated turn instructions:\n{refreshed_instructions.text}"
+                )
+
+                state.history[state.instructions_index] = refreshed_instructions
 
     def _build_tool_event_messages(
         self,

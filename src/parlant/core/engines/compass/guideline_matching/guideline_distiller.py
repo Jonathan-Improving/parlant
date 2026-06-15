@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+from collections.abc import Set
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -250,7 +251,7 @@ class GuidelineDistiller:
                     guideline.content.condition,
                     guideline.content.action,
                     guideline.content.description,
-                    context.state.tools_by_guideline.get(guideline.id, []),
+                    context.state.tools_by_guideline.get(guideline.id, set()),
                 ),
             },
             status=SectionStatus.ACTIVE,
@@ -411,7 +412,7 @@ def _format_guideline(
     condition: str,
     action: Optional[str],
     description: Optional[str],
-    tools: Sequence[tuple[ToolId, Tool]] = (),
+    tools: Set[tuple[ToolId, Tool]] = set(),
 ) -> str:
     # The action is optional and only present to contextualize the condition; omit it
     # entirely when absent rather than rendering "Action: None".

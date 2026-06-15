@@ -87,7 +87,7 @@ class GuidelineRecaller:
         # Mirror the alpha engine's retrieval query: build it from the whole
         # interaction rather than just the last message, so the embedding search
         # reflects the full conversational context.
-        if not context.interaction.events:
+        if not context.interaction.messages:
             return ""
 
-        return str([f"{m.source}: {m.content}\n\n" for m in context.interaction.messages])
+        return str([f"{m.source}: {m.content}\n\n" for m in context.interaction.messages[-5:]])
