@@ -18,6 +18,7 @@ from itertools import chain
 from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
@@ -62,7 +63,9 @@ class Responder:
         context: EngineContext,
         refresh_state: Callable[[EngineContext], Awaitable[None]] | None,
     ) -> Callable[[EngineContext], Awaitable[str]] | None:
-        if context.agent.effort in (Effort.MIN, Effort.LOW):
+        effort = get_dynamic_effort_level(context)
+
+        if effort in (Effort.MIN, Effort.LOW):
             return None  # No per-turn instructions for low effort agents
 
         cached_instructions: str | None = None
@@ -70,7 +73,9 @@ class Responder:
         async def build_step_instructions_once(ctx: EngineContext) -> str:
             nonlocal cached_instructions
 
-            if context.agent.effort not in (Effort.HIGH, Effort.MAX):
+            current_effort = get_dynamic_effort_level(ctx)
+
+            if current_effort not in (Effort.HIGH, Effort.MAX):
                 # For medium effort agents, cache the instructions after the first build,
                 # so we don't rebuild them for every step.
                 if cached_instructions is not None:
@@ -299,7 +304,7 @@ Finally, remember that this is a LIVE CONVERSATION, not email. Be simple, concis
         return builder.build()
 
     def _get_model_size(self, context: EngineContext) -> ModelSize:
-        match context.agent.effort:
+        match get_dynamic_effort_level(context):
             case Effort.MIN:
                 return ModelSize.SMALL
             case Effort.LOW:
@@ -314,7 +319,7 @@ Finally, remember that this is a LIVE CONVERSATION, not email. Be simple, concis
                 return None
 
     def _get_reasoning_config(self, context: EngineContext) -> ReasoningConfig | None:
-        match context.agent.effort:
+        match get_dynamic_effort_level(context):
             case Effort.MIN:
                 return ReasoningConfig(effort="minimal", visibility="none")
             case Effort.LOW:

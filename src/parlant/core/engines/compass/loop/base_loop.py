@@ -28,6 +28,7 @@ from parlant.core.emissions import MessageEventHandle, StatusEventHandle
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.alpha.tool_calling.tool_caller import ToolInsights
+from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext, IterationState
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob, LoopResult
 from parlant.core.engines.compass.tool_runner import ToolRunner
@@ -240,13 +241,18 @@ class BaseLoop(Loop):
                 )
             )
 
+            if len(job.context.state.iterations) >= 30:
+                self._logger.warning(
+                    f"Large number of engine iterations on session {job.context.session.id} ({job.context.session.title or 'Untitled'})"
+                )
+
             if len(job.context.state.iterations) == job.context.agent.max_engine_iterations:
                 # TODO: We need to force a message here in some way...
                 # Maybe we can control max turns in the generator itself?
                 # Maybe we should just add to the prompt that we've failed to
                 # converge to a desired outcome and are now stopping.
                 self._logger.error(
-                    f"Maximum engine iterations reached without preparing a response; forcing completion. Reasoning: \n{json.dumps(job.context.state.reasoning_steps, indent=2)}"
+                    f"Maximum engine iterations reached on session {job.context.session.id} ({job.context.session.title or 'Untitled'}) without preparing a response; forcing completion. Reasoning: \n{json.dumps(job.context.state.reasoning_steps, indent=2)}"
                 )
                 job.context.state.prepared_to_respond = True
 
@@ -262,7 +268,7 @@ class BaseLoop(Loop):
     def _max_semantic_failures(self, job: LoopJob) -> int:
         """The number of times a step can be restarted due to a reviewer-provided
         policy-adjusted reasoning before we give up and propagate the failure."""
-        match job.context.agent.effort:
+        match get_dynamic_effort_level(job.context):
             case Effort.MIN:
                 return 1
             case Effort.LOW:
@@ -445,11 +451,13 @@ class BaseLoop(Loop):
         reasoning: str,
         tool_calls: Sequence[ToolCallPart],
     ) -> str | None:
-        if context.agent.effort in (Effort.MIN, Effort.LOW):
+        effort = get_dynamic_effort_level(context)
+
+        if effort in (Effort.MIN, Effort.LOW):
             # Skip the review for minimal-effort agents
             return None
 
-        if (context.agent.effort == Effort.MEDIUM) and (
+        if (effort == Effort.MEDIUM) and (
             not self._has_matched_high_criticality_guidelines(context)
         ):
             # For non-high-effort agents, skip the review
@@ -466,6 +474,7 @@ class BaseLoop(Loop):
             reasoning,
             tool_calls,
         )
+        context.state.todo = review_result.remaining_tasks.strip()
 
         if review_result.breaches:
             return review_result.adjusted_reasoning
@@ -761,7 +770,7 @@ class BaseLoop(Loop):
             parts=[
                 TextPart(
                     text=f"""\
-[The following is notes and context about the current state of the conversation — the guidelines, glossary, and tools relevant to it. Treat it as background that informs your next reply; it is NOT itself a message addressed to you, so never respond to it, acknowledge it, or refer to it.]:
+The following is notes and context about the current state of the conversation — the guidelines, glossary, and tools relevant to it. Treat it as background that informs your next reply; it is NOT itself a message addressed to you, so never respond to it, acknowledge it, or refer to it.:
 {turn_instructions}"""
                 )
             ],
@@ -777,10 +786,23 @@ class BaseLoop(Loop):
         else:
             instructions = ""
 
+        reviewer_notes: list[str] = []
+
+        if job.context.state.todo:
+            reviewer_notes.append(
+                "#### TODO LIST: Remaining tasks before responding to the user\n\n"
+                + job.context.state.todo
+            )
+
         if job.context.state.step_notes:
+            reviewer_notes.append(
+                "#### Suggested reasoning for the next step\n\n" + job.context.state.step_notes
+            )
+
+        if reviewer_notes:
             instructions += (
                 "\n\n### IMPORTANT: Please mind the following notes for your next step:\n\n"
-                + job.context.state.step_notes
+                + "\n\n".join(reviewer_notes)
             )
 
         if state.instructions_index is not None:

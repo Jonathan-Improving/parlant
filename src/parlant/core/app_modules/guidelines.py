@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Mapping, Optional, Sequence, Set, cast
 
-from parlant.core.agents import AgentId, AgentStore, CompositionMode
+from parlant.core.agents import AgentId, AgentStore, CompositionMode, Effort
 from parlant.core.common import Criticality, ItemNotFoundError, JSONSerializable, UniqueId
 from parlant.core.guideline_tool_associations import (
     GuidelineToolAssociation,
@@ -160,6 +160,7 @@ class GuidelineModule:
         tags: Sequence[TagId] | None,
         id: GuidelineId | None = None,
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         track: bool = True,
         labels: Set[str] | None = None,
         priority: int = 0,
@@ -182,6 +183,7 @@ class GuidelineModule:
             tags=tags,
             id=id,
             composition_mode=composition_mode,
+            effort=effort,
             track=track,
             labels=labels,
             priority=priority,
@@ -220,6 +222,7 @@ class GuidelineModule:
         tags: GuidelineTagsUpdateParams | None,
         metadata: GuidelineMetadataUpdateParams | None,
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         labels: GuidelineLabelsUpdateParams | None = None,
         priority: int | None = None,
         signals: Sequence[str] | None = None,
@@ -234,6 +237,7 @@ class GuidelineModule:
             or criticality is not None
             or enabled is not None
             or composition_mode is not None
+            or effort is not None
             or priority is not None
             or signals is not None
         ):
@@ -252,6 +256,8 @@ class GuidelineModule:
                 update_params["enabled"] = enabled
             if composition_mode is not None:
                 update_params["composition_mode"] = composition_mode
+            if effort is not None:
+                update_params["effort"] = effort
             if priority is not None:
                 update_params["priority"] = priority
             if signals is not None:

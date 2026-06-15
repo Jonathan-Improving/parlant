@@ -370,6 +370,7 @@ guideline_dto_example = {
     "tags": ["tag1", "tag2"],
     "metadata": {"key1": "value1", "key2": "value2"},
     "composition_mode": None,
+    "effort": None,
     "labels": ["vip", "priority"],
 }
 
@@ -418,6 +419,7 @@ class GuidelineDTO(
     metadata: GuidelineMetadataField
     modified_utc: GuidelineLastModifiedField
     composition_mode: CompositionModeDTO | None = None
+    effort: EffortDTO | None = None
     track: bool = True
     labels: GuidelineLabelsField = set()
     priority: int = 0

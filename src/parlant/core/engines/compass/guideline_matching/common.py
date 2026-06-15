@@ -17,9 +17,7 @@ which evaluate one guideline per prompt and fan out concurrently."""
 
 from typing import Sequence
 
-from parlant.core.agents import Effort
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
 
 
@@ -48,21 +46,6 @@ While preparing the current response, you (the agent) have already reasoned thro
 """,
         props={"reasoning_text": reasoning_text},
     )
-
-
-def reasoning_effort_for(context: EngineContext) -> str:
-    """Map the agent's configured effort to a model ``reasoning_effort`` hint."""
-    match context.agent.effort:
-        case Effort.MIN:
-            return "minimal"
-        case Effort.LOW:
-            return "minimal"
-        case Effort.MEDIUM:
-            return "low"
-        case Effort.HIGH:
-            return "low"
-        case Effort.MAX:
-            return "medium"
 
 
 def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo:

@@ -33,6 +33,8 @@ from parlant.api.common import (
     apigen_config,
     composition_mode_dto_to_composition_mode,
     composition_mode_to_composition_mode_dto,
+    effort_dto_to_effort,
+    effort_to_effort_dto,
     guideline_dto_example,
 )
 from parlant.core.app_modules.guidelines import (
@@ -229,6 +231,7 @@ guideline_creation_params_example: ExampleJson = {
     "enabled": False,
     "metadata": {"key1": "value1", "key2": "value2"},
     "composition_mode": "strict_canned",
+    "effort": "high",
     "labels": ["vip", "priority"],
 }
 
@@ -249,6 +252,7 @@ class GuidelineCreationParamsDTO(
     enabled: GuidelineEnabledField | None = None
     tags: GuidelineTagsField | None = None
     composition_mode: CompositionModeDTO | None = None
+    effort: common.EffortDTO | None = None
     track: bool = True
     labels: GuidelineLabelsField | None = None
     priority: int = 0
@@ -283,6 +287,7 @@ guideline_update_params_example: ExampleJson = {
     "condition": "when the customer asks about pricing",
     "action": "provide current pricing information",
     "enabled": True,
+    "effort": "high",
     "tags": ["tag1", "tag2"],
     "metadata": {
         "set": {
@@ -324,6 +329,7 @@ class GuidelineUpdateParamsDTO(
     tags: GuidelineTagsUpdateParamsDTO | None = None
     metadata: GuidelineMetadataUpdateParamsDTO | None = None
     composition_mode: CompositionModeDTO | None = None
+    effort: common.EffortDTO | None = None
     labels: GuidelineLabelsUpdateParamsDTO | None = None
     priority: int | None = None
     signals: common.GuidelineSignalsField | None = None
@@ -422,6 +428,29 @@ def _guideline_relationship_kind_to_dto(
             raise ValueError(f"Invalid guideline relationship kind: {kind.value}")
 
 
+def _guideline_to_dto(guideline: Guideline) -> GuidelineDTO:
+    return GuidelineDTO(
+        id=guideline.id,
+        condition=guideline.content.condition,
+        action=guideline.content.action,
+        description=guideline.content.description,
+        title=guideline.title,
+        criticality=_criticality_to_dto(guideline.criticality),
+        enabled=guideline.enabled,
+        tags=guideline.tags,
+        metadata=guideline.metadata,
+        modified_utc=guideline.modified_utc,
+        composition_mode=composition_mode_to_composition_mode_dto(guideline.composition_mode)
+        if guideline.composition_mode
+        else None,
+        effort=effort_to_effort_dto(guideline.effort) if guideline.effort else None,
+        track=guideline.track,
+        labels=guideline.labels,
+        priority=guideline.priority,
+        signals=guideline.signals,
+    )
+
+
 def _guideline_relationship_to_dto(
     relationship: GuidelineRelationship,
     indirect: bool,
@@ -438,27 +467,7 @@ def _guideline_relationship_to_dto(
 
     return RelationshipDTO(
         id=relationship.id,
-        source_guideline=GuidelineDTO(
-            id=rel_source_guideline.id,
-            condition=rel_source_guideline.content.condition,
-            action=rel_source_guideline.content.action,
-            description=rel_source_guideline.content.description,
-            title=rel_source_guideline.title,
-            criticality=_criticality_to_dto(rel_source_guideline.criticality),
-            enabled=rel_source_guideline.enabled,
-            tags=rel_source_guideline.tags,
-            metadata=rel_source_guideline.metadata,
-            modified_utc=rel_source_guideline.modified_utc,
-            composition_mode=composition_mode_to_composition_mode_dto(
-                rel_source_guideline.composition_mode
-            )
-            if rel_source_guideline.composition_mode
-            else None,
-            track=rel_source_guideline.track,
-            labels=rel_source_guideline.labels,
-            priority=rel_source_guideline.priority,
-            signals=rel_source_guideline.signals,
-        )
+        source_guideline=_guideline_to_dto(rel_source_guideline)
         if relationship.source_type == RelationshipEntityKind.GUIDELINE
         else None,
         source_tag=TagDTO(
@@ -468,28 +477,7 @@ def _guideline_relationship_to_dto(
         )
         if relationship.source_type.is_tag
         else None,
-        target_guideline=GuidelineDTO(
-            id=cast(Guideline | Tag, relationship.target).id,
-            creation_utc=rel_target_guideline.creation_utc,
-            condition=rel_target_guideline.content.condition,
-            action=rel_target_guideline.content.action,
-            description=rel_target_guideline.content.description,
-            title=rel_target_guideline.title,
-            criticality=_criticality_to_dto(rel_target_guideline.criticality),
-            enabled=rel_target_guideline.enabled,
-            tags=rel_target_guideline.tags,
-            metadata=rel_target_guideline.metadata,
-            modified_utc=rel_target_guideline.modified_utc,
-            composition_mode=composition_mode_to_composition_mode_dto(
-                rel_target_guideline.composition_mode
-            )
-            if rel_target_guideline.composition_mode
-            else None,
-            track=rel_target_guideline.track,
-            labels=rel_target_guideline.labels,
-            priority=rel_target_guideline.priority,
-            signals=rel_target_guideline.signals,
-        )
+        target_guideline=_guideline_to_dto(rel_target_guideline)
         if relationship.target_type == RelationshipEntityKind.GUIDELINE
         else None,
         target_tag=TagDTO(
@@ -557,6 +545,7 @@ def create_router(
                 composition_mode=composition_mode_dto_to_composition_mode(params.composition_mode)
                 if params.composition_mode
                 else None,
+                effort=effort_dto_to_effort(params.effort) if params.effort else None,
                 track=params.track,
                 labels=params.labels,
                 priority=params.priority,
@@ -568,25 +557,7 @@ def create_router(
                 detail=str(e),
             )
 
-        return GuidelineDTO(
-            id=guideline.id,
-            condition=guideline.content.condition,
-            action=guideline.content.action,
-            description=guideline.content.description,
-            title=guideline.title,
-            criticality=_criticality_to_dto(guideline.criticality),
-            metadata=guideline.metadata,
-            modified_utc=guideline.modified_utc,
-            enabled=guideline.enabled,
-            tags=guideline.tags,
-            composition_mode=composition_mode_to_composition_mode_dto(guideline.composition_mode)
-            if guideline.composition_mode
-            else None,
-            track=guideline.track,
-            labels=guideline.labels,
-            priority=guideline.priority,
-            signals=guideline.signals,
-        )
+        return _guideline_to_dto(guideline)
 
     @router.get(
         "",
@@ -615,30 +586,7 @@ def create_router(
 
         guidelines = await app.guidelines.find(tag_id=tag_id)
 
-        return [
-            GuidelineDTO(
-                id=guideline.id,
-                condition=guideline.content.condition,
-                action=guideline.content.action,
-                description=guideline.content.description,
-                title=guideline.title,
-                criticality=_criticality_to_dto(guideline.criticality),
-                metadata=guideline.metadata,
-                modified_utc=guideline.modified_utc,
-                enabled=guideline.enabled,
-                tags=guideline.tags,
-                composition_mode=composition_mode_to_composition_mode_dto(
-                    guideline.composition_mode
-                )
-                if guideline.composition_mode
-                else None,
-                track=guideline.track,
-                labels=guideline.labels,
-                priority=guideline.priority,
-                signals=guideline.signals,
-            )
-            for guideline in guidelines
-        ]
+        return [_guideline_to_dto(guideline) for guideline in guidelines]
 
     @router.get(
         "/{guideline_id}",
@@ -683,27 +631,7 @@ def create_router(
         )
 
         return GuidelineWithRelationshipsAndToolAssociationsDTO(
-            guideline=GuidelineDTO(
-                id=guideline.id,
-                condition=guideline.content.condition,
-                action=guideline.content.action,
-                description=guideline.content.description,
-                title=guideline.title,
-                criticality=_criticality_to_dto(guideline.criticality),
-                metadata=guideline.metadata,
-                modified_utc=guideline.modified_utc,
-                enabled=guideline.enabled,
-                tags=guideline.tags,
-                composition_mode=composition_mode_to_composition_mode_dto(
-                    guideline.composition_mode
-                )
-                if guideline.composition_mode
-                else None,
-                track=guideline.track,
-                labels=guideline.labels,
-                priority=guideline.priority,
-                signals=guideline.signals,
-            ),
+            guideline=_guideline_to_dto(guideline),
             relationships=[
                 _guideline_relationship_to_dto(relationship, indirect)
                 for relationship, indirect in relationships
@@ -797,6 +725,7 @@ def create_router(
             composition_mode=composition_mode_dto_to_composition_mode(params.composition_mode)
             if params.composition_mode
             else None,
+            effort=effort_dto_to_effort(params.effort) if params.effort else None,
             labels=GuidelineLabelsUpdateParams(
                 upsert=params.labels.upsert,
                 remove=params.labels.remove,
@@ -810,27 +739,7 @@ def create_router(
         guideline_tool_associations = await app.guidelines.find_tool_associations(guideline_id)
 
         return GuidelineWithRelationshipsAndToolAssociationsDTO(
-            guideline=GuidelineDTO(
-                id=updated_guideline.id,
-                condition=updated_guideline.content.condition,
-                action=updated_guideline.content.action,
-                description=updated_guideline.content.description,
-                title=updated_guideline.title,
-                criticality=_criticality_to_dto(updated_guideline.criticality),
-                metadata=updated_guideline.metadata,
-                modified_utc=updated_guideline.modified_utc,
-                enabled=updated_guideline.enabled,
-                tags=updated_guideline.tags,
-                composition_mode=composition_mode_to_composition_mode_dto(
-                    updated_guideline.composition_mode
-                )
-                if updated_guideline.composition_mode
-                else None,
-                track=updated_guideline.track,
-                labels=updated_guideline.labels,
-                priority=updated_guideline.priority,
-                signals=updated_guideline.signals,
-            ),
+            guideline=_guideline_to_dto(updated_guideline),
             relationships=[
                 _guideline_relationship_to_dto(relationship, indirect)
                 for relationship, indirect in await app.guidelines.find_relationships(

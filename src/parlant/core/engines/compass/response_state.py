@@ -68,6 +68,10 @@ class ResponseState:
     # policy. Empty means no breach was found, or the reviewer has not run yet.
     step_notes: str = ""
 
+    # Reviewer-provided summary of what the agent still needs to do before
+    # responding to the user. Empty means the reviewer has not run yet.
+    todo: str = ""
+
     # Per-turn signals the matcher precomputes (once) so its per-guideline strategy
     # selection can stay synchronous: guidelines that carry tools, and guidelines
     # that participate in a dependency relationship.

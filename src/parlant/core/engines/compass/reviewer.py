@@ -21,7 +21,7 @@ from itertools import chain
 from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.alpha.prompt_builder import EventAdaptationFormat, PromptBuilder
-from parlant.core.engines.compass.guideline_matching.common import reasoning_effort_for
+from parlant.core.engines.compass.common import reasoning_effort_for
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
@@ -34,6 +34,7 @@ from parlant.core.tracer import Tracer
 class ReviewSchema(DefaultBaseModel):
     restated_user_request: str
     relevant_policies: str
+    remaining_tasks: str
     breaches: str | None = None
     adjusted_reasoning: str | None = None
 
@@ -42,6 +43,7 @@ class ReviewSchema(DefaultBaseModel):
 class ReviewResult:
     restated_user_request: str
     relevant_policies: str
+    remaining_tasks: str
     breaches: str | None
     adjusted_reasoning: str | None
     generation_info: GenerationInfo
@@ -86,18 +88,19 @@ class Reviewer:
             result = ReviewResult(
                 restated_user_request=inference.content.restated_user_request,
                 relevant_policies=inference.content.relevant_policies,
+                remaining_tasks=inference.content.remaining_tasks,
                 breaches=breaches,
                 adjusted_reasoning=adjusted_reasoning.strip() if adjusted_reasoning else None,
                 generation_info=inference.info,
             )
 
             if result.breaches:
-                self._logger.warning(
-                    f"{self.__class__.__name__} tool-call policy violation detected:\n"
+                self._logger.debug(
+                    f"{self.__class__.__name__} intercepted policy violation(s):\n"
                     f"{self._format_review_log(result)}"
                 )
             else:
-                self._logger.debug(
+                self._logger.trace(
                     f"{self.__class__.__name__} tool-call review result:\n"
                     f"{self._format_review_log(result)}"
                 )
@@ -132,6 +135,8 @@ Do not report harmless naming differences, reasonable ambiguity, or cases where 
 
 Always restate the user's current relevant request in "restated_user_request".
 Always identify the currently relevant policies in "relevant_policies".
+Always summarize what you still need to do before responding to the user in "remaining_tasks".
+Write "remaining_tasks" as brief bullet points, addressed from your own perspective as the agent. Include any remaining tool execution, result inspection, missing-information collection, confirmation, or response composition work that must happen before you come back to the user.
 If there are no breaches, set "breaches" to null and omit "adjusted_reasoning".
 If there are one or more breaches:
 1. Explain the breach briefly in "breaches", including which proposed tool call or argument is problematic and why.
@@ -223,32 +228,46 @@ These are all tools currently available to the agent, including their argument r
             builder.add_section(
                 name="reviewer-previous-agent-reasoning",
                 template="""
-    # PREVIOUS AGENT REASONING THIS TURN
+# PREVIOUS AGENT REASONING THIS TURN
 
-    The agent's reasoning steps from previous completed steps in this turn are as follows:
+The agent's reasoning steps from previous completed steps in this turn are as follows:
 
-    {reasoning_steps}
-    """,
+{reasoning_steps}
+""",
                 props={
                     "reasoning_steps": self._format_reasoning_steps(context.state.reasoning_steps),
                 },
             )
 
-            if reasoning.strip():
-                builder.add_section(
-                    name="reviewer-current-agent-reasoning",
-                    template="""
-        # CURRENT STEP REASONING
+        if context.state.todo.strip():
+            builder.add_section(
+                name="reviewer-current-remaining-tasks",
+                template="""
+# CURRENT REMAINING TASKS
 
-        This is the current step's reasoning that led to the proposed tool calls:
+The previously reviewed remaining tasks before the agent responds to the user were:
 
-        {reasoning}
-        """,
-                    props={
-                        "reasoning": reasoning.strip()
-                        or "[No current-step reasoning was provided.]",
-                    },
-                )
+{todo}
+""",
+                props={
+                    "todo": context.state.todo.strip(),
+                },
+            )
+
+        if reasoning.strip():
+            builder.add_section(
+                name="reviewer-current-agent-reasoning",
+                template="""
+# CURRENT STEP REASONING
+
+This is the current step's reasoning that led to the proposed tool calls:
+
+{reasoning}
+""",
+                props={
+                    "reasoning": reasoning.strip(),
+                },
+            )
 
         builder.add_section(
             name="reviewer-proposed-tool-calls",
@@ -301,6 +320,7 @@ Only offer information and offer services that are sourced from this prompt. Nev
         result: dict[str, JSONSerializable] = {
             "restated_user_request": "REQUIRED. A concise restatement of the user's current relevant request, including any concrete entities or items needed to assess the proposed tool calls.",
             "relevant_policies": "REQUIRED. Briefly describe the current governing instructions and policies relevant to the proposed tool calls and arguments.",
+            "remaining_tasks": "REQUIRED. A brief bullet-point summary of what you still need to do before responding to the user, such as running allowed tools, inspecting results, collecting missing information, obtaining confirmation, or composing the final response.",
             "breaches": "<STRING | NULL: leave null if there are no breaches. If there are breaches, concisely explain which proposed tool call or argument would breach policy and why>",
             "adjusted_reasoning": "<REQUIRED when breaches is a string; omit or leave null when breaches is null. A fully self-contained replacement for the current step's reasoning, written in first person as the agent's corrected internal reasoning. Include the user's relevant request, applicable policy constraint, why the proposed tool/action is not allowed yet, missing information, and the next compliant action. Do not refer to the rejected attempt, your breach explanation, or what the agent previously failed to do>",
         }
@@ -316,6 +336,7 @@ Only offer information and offer services that are sourced from this prompt. Nev
                 {
                     "restated_user_request": result.restated_user_request,
                     "relevant_policies": result.relevant_policies,
+                    "remaining_tasks": result.remaining_tasks,
                     "breaches": result.breaches,
                     "adjusted_reasoning": result.adjusted_reasoning,
                 },

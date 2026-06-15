@@ -27,6 +27,7 @@ from parlant.api.common import (
     TagIdField,
     ToolIdDTO,
     apigen_config,
+    effort_to_effort_dto,
     tool_to_dto,
 )
 from parlant.core.app_modules.relationships import RelationshipModel
@@ -183,6 +184,9 @@ def create_router(
                 tags=model.source_guideline.tags,
                 metadata=model.source_guideline.metadata,
                 modified_utc=model.source_guideline.modified_utc,
+                effort=effort_to_effort_dto(model.source_guideline.effort)
+                if model.source_guideline.effort
+                else None,
                 priority=model.source_guideline.priority,
             )
             if model.source_guideline
@@ -201,6 +205,9 @@ def create_router(
                 tags=model.target_guideline.tags,
                 metadata=model.target_guideline.metadata,
                 modified_utc=model.target_guideline.modified_utc,
+                effort=effort_to_effort_dto(model.target_guideline.effort)
+                if model.target_guideline.effort
+                else None,
                 priority=model.target_guideline.priority,
             )
             if model.target_guideline

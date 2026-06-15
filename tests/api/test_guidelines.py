@@ -1090,6 +1090,45 @@ async def test_that_guideline_composition_mode_can_be_set_and_updated(
     assert guideline["composition_mode"] == "strict_canned"
 
 
+async def test_that_guideline_effort_can_be_set_and_updated(
+    async_client: httpx.AsyncClient,
+) -> None:
+    response = await async_client.post(
+        "/guidelines",
+        json={
+            "condition": "User asks about regulated investing",
+            "action": "Apply extra care before responding",
+            "effort": "high",
+        },
+    )
+
+    assert response.status_code == status.HTTP_201_CREATED
+    guideline = response.json()
+    guideline_id = guideline["id"]
+    assert guideline["effort"] == "high"
+
+    response = await async_client.get(f"/guidelines/{guideline_id}")
+    assert response.status_code == status.HTTP_200_OK
+    guideline = response.json()["guideline"]
+    assert guideline["effort"] == "high"
+
+    response = await async_client.patch(
+        f"/guidelines/{guideline_id}",
+        json={
+            "effort": "max",
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    guideline = response.json()["guideline"]
+    assert guideline["effort"] == "max"
+
+    response = await async_client.get(f"/guidelines/{guideline_id}")
+    assert response.status_code == status.HTTP_200_OK
+    guideline = response.json()["guideline"]
+    assert guideline["effort"] == "max"
+
+
 ###############################################################################
 ## Labels Tests
 ###############################################################################

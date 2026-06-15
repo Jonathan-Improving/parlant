@@ -983,7 +983,7 @@ The following are "principles" - these are instructions that are considered less
             if tool.consequential:
                 any_consequential = True
                 line = f"- {tool.name} - CONSEQUENTIAL\n"
-                line += f"[Tool description reminder]: {tool.description}\n\n"
+                line += f"[Tool description reminder]: {tool.description}\n"
             else:
                 line = f"- {tool.name}"
 
@@ -1016,7 +1016,7 @@ For this turn of the interaction, some tools have been identified as relevant to
 """,
                 props={
                     "preface": preface,
-                    "tool_list": "\n".join(tool_lines),
+                    "tool_list": "\n\n".join(tool_lines),
                     "consequential_note": consequential_note if any_consequential else "",
                 },
                 status=SectionStatus.ACTIVE,

@@ -1256,6 +1256,7 @@ class Guideline:
     _store_provider: StoreProvider
 
     labels: set[str] = field(default_factory=set)
+    effort: Effort | None = None
     priority: int = 0
 
     async def entail(self, guideline: Guideline) -> Relationship:
@@ -2509,6 +2510,7 @@ class Journey:
         canned_responses: Sequence[CannedResponseId] = [],
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -2535,6 +2537,7 @@ class Journey:
             canned_responses=canned_responses,
             criticality=criticality,
             composition_mode=composition_mode,
+            effort=effort,
             matcher=matcher,
             on_selected=on_selected,
             on_message=on_message,
@@ -2560,6 +2563,7 @@ class Journey:
         tools: Iterable[ToolRef] = [],
         canned_responses: Sequence[CannedResponseId] = [],
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -2582,6 +2586,7 @@ class Journey:
             tools=tools,
             canned_responses=canned_responses,
             composition_mode=composition_mode,
+            effort=effort,
             matcher=matcher,
             on_selected=on_selected,
             canned_response_field_provider=canned_response_field_provider,
@@ -3301,6 +3306,7 @@ class Agent:
         canned_responses: Sequence[CannedResponseId] = [],
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -3327,6 +3333,7 @@ class Agent:
             canned_responses=canned_responses,
             criticality=criticality,
             composition_mode=composition_mode,
+            effort=effort,
             matcher=matcher,
             on_selected=on_selected,
             on_message=on_message,
@@ -3353,6 +3360,7 @@ class Agent:
         canned_responses: Sequence[CannedResponseId] = [],
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -3375,6 +3383,7 @@ class Agent:
             tools=tools,
             canned_responses=canned_responses,
             composition_mode=composition_mode,
+            effort=effort,
             matcher=matcher,
             on_selected=on_selected,
             criticality=criticality,
@@ -4263,6 +4272,7 @@ class Server:
         metadata: dict[str, JSONSerializable],
         criticality: Criticality,
         composition_mode: CompositionMode | None,
+        effort: Effort | None,
         canned_responses: Sequence[CannedResponseId],
         matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]] | None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None,
@@ -4300,6 +4310,7 @@ class Server:
             criticality=criticality,
             metadata=metadata,
             composition_mode=CompositionMode._to_core_composition_mode(composition_mode),
+            effort=effort,
             id=id,
             tags=tags,
             track=track,
@@ -4358,6 +4369,7 @@ class Server:
             tags=_tags_from_ids(guideline.tags),
             metadata=guideline.metadata,
             labels=guideline.labels,
+            effort=guideline.effort,
             priority=guideline.priority,
             _server=self,
             _container=self.container,
@@ -5265,6 +5277,7 @@ class Server:
                     action=guideline.content.action,
                     tags=_tags_from_ids(guideline.tags),
                     metadata=guideline.metadata,
+                    effort=guideline.effort,
                     _server=self,
                     _container=self._container,
                     _store_provider=self._store_provider,

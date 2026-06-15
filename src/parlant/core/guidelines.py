@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from parlant.core import async_utils
-from parlant.core.agents import CompositionMode
+from parlant.core.agents import CompositionMode, Effort
 from parlant.core.async_utils import ReaderWriterLock, safe_gather
 from parlant.core.common import (
     Criticality,
@@ -80,6 +80,7 @@ class Guideline:
     title: Optional[str] = None
     labels: Set[str] = field(default_factory=set)
     composition_mode: Optional[CompositionMode] = None
+    effort: Optional[Effort] = None
     track: bool = True
     priority: int = 0
     signals: Sequence[str] = field(default_factory=list)
@@ -110,6 +111,7 @@ class GuidelineUpdateParams(TypedDict, total=False):
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
     composition_mode: Optional[CompositionMode]
+    effort: Optional[Effort]
     track: bool
     priority: int
     signals: Sequence[str]
@@ -136,6 +138,7 @@ class GuidelineStore(ABC):
         tags: Optional[Sequence[TagId]] = None,
         id: Optional[GuidelineId] = None,
         composition_mode: Optional[CompositionMode] = None,
+        effort: Optional[Effort] = None,
         track: bool = True,
         labels: Optional[Set[str]] = None,
         priority: int = 0,
@@ -365,6 +368,25 @@ class GuidelineDocument_v0_11_0(TypedDict, total=False):
     priority: int
 
 
+class GuidelineDocument_v0_12_0(TypedDict, total=False):
+    id: ObjectId
+    version: Version.String
+    creation_utc: str
+    last_modified: str
+    condition: str
+    action: Optional[str]
+    description: Optional[str]
+    title: Optional[str]
+    criticality: str
+    enabled: bool
+    metadata: Mapping[str, JSONSerializable]
+    composition_mode: Optional[str]
+    track: bool
+    labels: Sequence[str]
+    priority: int
+    signals: Sequence[str]
+
+
 class GuidelineDocument(TypedDict, total=False):
     id: ObjectId
     version: Version.String
@@ -378,6 +400,7 @@ class GuidelineDocument(TypedDict, total=False):
     enabled: bool
     metadata: Mapping[str, JSONSerializable]
     composition_mode: Optional[str]
+    effort: Optional[str]
     track: bool
     labels: Sequence[str]
     priority: int
@@ -414,7 +437,7 @@ async def guideline_document_converter_0_1_0_to_0_2_0(doc: BaseDocument) -> Opti
 
 
 class GuidelineVectorStore(GuidelineStore):
-    VERSION = Version.from_string("0.12.0")
+    VERSION = Version.from_string("0.13.0")
 
     def __init__(
         self,
@@ -447,9 +470,31 @@ class GuidelineVectorStore(GuidelineStore):
         return cast(GuidelineVectorDocument, doc)
 
     async def _document_loader(self, doc: BaseDocument) -> Optional[GuidelineDocument]:
+        async def v0_12_0_to_v0_13_0(doc: BaseDocument) -> Optional[BaseDocument]:
+            d = cast(GuidelineDocument_v0_12_0, doc)
+            return GuidelineDocument(
+                id=d["id"],
+                version=Version.String("0.13.0"),
+                creation_utc=d["creation_utc"],
+                last_modified=d.get("last_modified", d["creation_utc"]),
+                condition=d["condition"],
+                action=d["action"],
+                description=d.get("description", None),
+                title=d.get("title", None),
+                criticality=d["criticality"],
+                enabled=d["enabled"],
+                metadata=d["metadata"],
+                composition_mode=d.get("composition_mode"),
+                effort=None,
+                track=d.get("track", True),
+                labels=d.get("labels", []),
+                priority=d.get("priority", 0),
+                signals=d.get("signals", []),
+            )
+
         async def v0_11_0_to_v0_12_0(doc: BaseDocument) -> Optional[BaseDocument]:
             d = cast(GuidelineDocument_v0_11_0, doc)
-            return GuidelineDocument(
+            return GuidelineDocument_v0_12_0(
                 id=d["id"],
                 version=Version.String("0.12.0"),
                 creation_utc=d["creation_utc"],
@@ -612,6 +657,7 @@ class GuidelineVectorStore(GuidelineStore):
                 "0.9.0": v0_9_0_to_v0_10_0,
                 "0.10.0": v0_10_0_to_v0_11_0,
                 "0.11.0": v0_11_0_to_v0_12_0,
+                "0.12.0": v0_12_0_to_v0_13_0,
             },
         ).migrate(doc)
 
@@ -716,6 +762,7 @@ class GuidelineVectorStore(GuidelineStore):
             composition_mode=(
                 guideline.composition_mode.value if guideline.composition_mode else None
             ),
+            effort=guideline.effort.value if guideline.effort else None,
             track=guideline.track,
             labels=list(guideline.labels),
             priority=guideline.priority,
@@ -735,6 +782,8 @@ class GuidelineVectorStore(GuidelineStore):
 
         composition_mode_str = guideline_document.get("composition_mode")
         composition_mode = CompositionMode(composition_mode_str) if composition_mode_str else None
+        effort_str = guideline_document.get("effort")
+        effort = Effort(effort_str) if effort_str else None
 
         return Guideline(
             id=GuidelineId(guideline_document["id"]),
@@ -752,6 +801,7 @@ class GuidelineVectorStore(GuidelineStore):
             metadata=guideline_document["metadata"],
             labels=set(guideline_document.get("labels", [])),
             composition_mode=composition_mode,
+            effort=effort,
             track=guideline_document.get("track", True),
             priority=guideline_document.get("priority", 0),
             signals=list(guideline_document.get("signals", [])),
@@ -826,6 +876,7 @@ class GuidelineVectorStore(GuidelineStore):
         tags: Optional[Sequence[TagId]] = None,
         id: Optional[GuidelineId] = None,
         composition_mode: Optional[CompositionMode] = None,
+        effort: Optional[Effort] = None,
         track: bool = True,
         labels: Optional[Set[str]] = None,
         priority: int = 0,
@@ -863,6 +914,7 @@ class GuidelineVectorStore(GuidelineStore):
                 metadata=metadata,
                 labels=labels or set(),
                 composition_mode=composition_mode,
+                effort=effort,
                 track=track,
                 priority=priority,
                 signals=list(signals),
@@ -1006,6 +1058,16 @@ class GuidelineVectorStore(GuidelineStore):
                             )
                         }
                         if "composition_mode" in params
+                        else {}
+                    ),
+                    **(
+                        {
+                            "effort": (
+                                # Note that updating to None is also valid
+                                params["effort"].value if params["effort"] is not None else None
+                            )
+                        }
+                        if "effort" in params
                         else {}
                     ),
                     **({"priority": params["priority"]} if "priority" in params else {}),
@@ -1295,6 +1357,7 @@ class CompositeGuidelineStore(GuidelineStore):
         tags: Optional[Sequence[TagId]] = None,
         id: Optional[GuidelineId] = None,
         composition_mode: Optional[CompositionMode] = None,
+        effort: Optional[Effort] = None,
         track: bool = True,
         labels: Optional[Set[str]] = None,
         priority: int = 0,
@@ -1312,6 +1375,7 @@ class CompositeGuidelineStore(GuidelineStore):
             tags=tags,
             id=id,
             composition_mode=composition_mode,
+            effort=effort,
             track=track,
             labels=labels,
             priority=priority,

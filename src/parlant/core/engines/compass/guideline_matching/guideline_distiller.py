@@ -25,8 +25,8 @@ from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.compass.guideline_matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
-    reasoning_effort_for,
 )
+from parlant.core.engines.compass.common import reasoning_effort_for
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.loggers import Logger

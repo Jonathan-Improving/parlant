@@ -18,6 +18,7 @@ from itertools import chain
 from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import LoopJob
 from parlant.core.engines.compass.loop.streaming_loop import StreamingLoop
@@ -263,7 +264,7 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         return builder.build()
 
     def _get_model_size(self, context: EngineContext) -> ModelSize:
-        match context.agent.effort:
+        match get_dynamic_effort_level(context):
             case Effort.MIN:
                 return ModelSize.SMALL
             case Effort.LOW:
@@ -278,7 +279,7 @@ In cases of conflict, prioritize the business's values and ensure your decisions
                 return None
 
     def _get_reasoning_config(self, context: EngineContext) -> ReasoningConfig | None:
-        match context.agent.effort:
+        match get_dynamic_effort_level(context):
             case Effort.MIN:
                 return ReasoningConfig(effort="minimal", visibility="none")
             case Effort.LOW:
