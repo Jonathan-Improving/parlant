@@ -358,6 +358,9 @@ These are all tools currently available to the agent, including their argument r
             },
         )
 
+        if context.state.session_summary:
+            builder.add_session_summary(context.state.session_summary)
+
         builder.add_interaction_history(
             context.interaction.events, format=EventAdaptationFormat.ROLE_SCRIPT
         )

@@ -141,6 +141,41 @@ class EventBuffer(EventEmitter):
         return MessageEventHandle(event=event, update=updater)
 
     @override
+    async def emit_system_message_event(
+        self,
+        trace_id: str,
+        data: str | MessageEventData,
+        metadata: Mapping[str, JSONSerializable] | None = None,
+    ) -> MessageEventHandle:
+        if isinstance(data, str):
+            message_data = cast(
+                JSONSerializable,
+                MessageEventData(
+                    message=data,
+                    participant={
+                        "id": None,
+                        "display_name": "System",
+                    },
+                ),
+            )
+        else:
+            message_data = cast(JSONSerializable, data)
+
+        event = EmittedEvent(
+            source=EventSource.SYSTEM,
+            kind=EventKind.MESSAGE,
+            trace_id=trace_id,
+            data=message_data,
+            metadata=metadata,
+        )
+
+        event_index = len(self.events)
+        self.events.append(event)
+
+        updater = EventBufferMessageUpdater(buffer=self, event_index=event_index)
+        return MessageEventHandle(event=event, update=updater)
+
+    @override
     async def emit_tool_event(
         self,
         trace_id: str,

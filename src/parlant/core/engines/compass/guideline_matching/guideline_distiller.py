@@ -400,6 +400,8 @@ OUTPUT FORMAT
         builder.add_context_variables(context.state.context_variables)
         builder.add_glossary(list(context.state.glossary_terms))
         builder.add_capabilities_for_guideline_matching(context.state.capabilities)
+        if context.state.session_summary:
+            builder.add_session_summary(context.state.session_summary)
         builder.add_interaction_history(context.interaction.events)
 
         return builder

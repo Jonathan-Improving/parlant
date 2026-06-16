@@ -71,6 +71,10 @@ class ResponseState:
     # initial match (no steps have run yet).
     reasoning_steps: list[str] = field(default_factory=list)
 
+    # Durable summary of session events before the latest compaction marker.
+    # Empty means no compaction summary is active for this loaded interaction.
+    session_summary: str = ""
+
     # Reviewer-provided replacement reasoning when pending tool calls would breach
     # policy. Empty means no breach was found, or the reviewer has not run yet.
     step_notes: str = ""

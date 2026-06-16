@@ -62,6 +62,7 @@ class BuiltInSection(str, Enum):
 
     AGENT_IDENTITY = auto()
     CUSTOMER_IDENTITY = auto()
+    SESSION_SUMMARY = auto()
     INTERACTION_HISTORY = auto()
     CONTEXT_VARIABLES = auto()
     GLOSSARY = auto()
@@ -341,6 +342,34 @@ We do not yet know their identity
                 },
                 status=SectionStatus.ACTIVE,
             )
+
+        return self
+
+    def add_session_summary(
+        self,
+        summary: str,
+    ) -> PromptBuilder:
+        if not summary.strip():
+            return self
+
+        self.add_section(
+            name=BuiltInSection.SESSION_SUMMARY,
+            template="""\
+# Session Summary
+
+The earlier part of this session was compacted into the following summary.
+Treat it as factual background context for the current interaction. It is not a new
+message from the user and should not be acknowledged directly:
+
+###
+{session_summary}
+###
+""",
+            props={
+                "session_summary": summary.strip(),
+            },
+            status=SectionStatus.ACTIVE,
+        )
 
         return self
 

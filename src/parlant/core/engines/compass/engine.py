@@ -14,14 +14,16 @@
 
 from collections.abc import Sequence
 import traceback
+from typing import cast
 from typing_extensions import override
 
-from parlant.core.async_utils import delay
+from parlant.core.async_utils import CancellationSuppressionLatch, delay, latched_shield
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.emissions import EventEmitter
 from parlant.core.engines.entity_context import EntityContext
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.engine_context import Interaction
+from parlant.core.engines.compass.compacter import Compacter
 from parlant.core.engines.compass.matcher import Matcher
 from parlant.core.engines.compass.responder import Responder
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
@@ -29,7 +31,7 @@ from parlant.core.engines.types import Context, Engine, UtteranceRequest
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
 from parlant.core.meter import Meter
-from parlant.core.sessions import StatusEventData
+from parlant.core.sessions import Event, EventKind, EventSource, MessageEventData, StatusEventData
 from parlant.core.tracer import Tracer
 
 
@@ -41,6 +43,7 @@ class CompassEngine(Engine):
         meter: Meter,
         matcher: Matcher,
         responder: Responder,
+        compacter: Compacter,
         entity_queries: EntityQueries,
         hooks: EngineHooks,
     ) -> None:
@@ -50,6 +53,7 @@ class CompassEngine(Engine):
 
         self._matcher = matcher
         self._responder = responder
+        self._compacter = compacter
 
         self._entity_queries = entity_queries
         self._hooks = hooks
@@ -119,6 +123,7 @@ class CompassEngine(Engine):
             # instructions after each step, to reevaluate guidelines gated on the
             # tools that just ran.
             await self._responder.respond(engine_context, self._refresh_state)
+            await self._compact_if_needed(engine_context)
         except Exception as e:
             self._logger.error(
                 f"Error processing context: {e}\n\n{''.join(traceback.format_exception(type(e), e, e.__traceback__))}"
@@ -155,8 +160,10 @@ class CompassEngine(Engine):
         session = await self._entity_queries.read_session(context.session_id)
         customer = await self._entity_queries.read_customer(session.customer_id)
 
+        state = ResponseState(agent_effort=agent.effort)
+
         if load_interaction:
-            interaction = await self._load_interaction_state(context)
+            interaction = await self._load_interaction_state(context, state)
         else:
             interaction = Interaction([])
 
@@ -170,7 +177,7 @@ class CompassEngine(Engine):
             session_event_emitter=event_emitter,
             response_event_emitter=EventBuffer(agent),
             interaction=interaction,
-            state=ResponseState(agent_effort=agent.effort),
+            state=state,
         )
 
         # Set in context for access by hooks and other components
@@ -178,12 +185,81 @@ class CompassEngine(Engine):
 
         return result
 
-    async def _load_interaction_state(self, context: Context) -> Interaction:
+    async def _load_interaction_state(
+        self,
+        context: Context,
+        state: ResponseState,
+    ) -> Interaction:
         history = await self._entity_queries.find_events(context.session_id)
 
+        state.session_summary = ""
+        events: list[Event] = []
+
+        for event in history:
+            if self._is_compaction_event(event):
+                events.clear()
+                state.session_summary = self._compaction_event_summary(event)
+                self._logger.debug(
+                    f"Loaded compaction marker for session {context.session_id}; "
+                    "discarding earlier interaction events."
+                )
+                continue
+
+            events.append(event)
+
         return Interaction(
-            events=history,
+            events=events,
         )
+
+    def _is_compaction_event(self, event: Event) -> bool:
+        return (
+            event.kind == EventKind.MESSAGE
+            and event.source == EventSource.SYSTEM
+            and event.metadata.get("source") == "compacter"
+        )
+
+    def _compaction_event_summary(self, event: Event) -> str:
+        return cast(MessageEventData, event.data)["message"]
+
+    async def _compact_if_needed(self, context: EngineContext) -> None:
+        try:
+            if not await self._compacter.needs_compaction(context):
+                return
+
+            await context.session_event_emitter.emit_status_event(
+                trace_id=self._tracer.trace_id,
+                data=StatusEventData(status="processing", message="Compacting session"),
+            )
+
+            # The trigger decision may use the pre-response in-memory interaction,
+            # but the summary itself must include persisted events emitted by this
+            # process() call before the compaction marker is appended.
+            context.interaction = await self._load_interaction_state(context.info, context.state)
+
+            async def uncancellable_compaction(
+                latch: CancellationSuppressionLatch[None],
+            ) -> None:
+                latch.enable()
+
+                result = await self._compacter.compact(context)
+                context.state.session_summary = result.summary
+
+                self._logger.debug(
+                    f"Compacted session {context.session.id}: {result.generation_info}"
+                )
+
+                await context.session_event_emitter.emit_system_message_event(
+                    trace_id=self._tracer.trace_id,
+                    data=result.summary,
+                    metadata={"source": "compacter"},
+                )
+
+            await latched_shield(uncancellable_compaction)
+        except Exception as exc:
+            self._logger.error(
+                "Session compaction failed after response generation: "
+                f"{exc}\n\n{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
+            )
 
     async def _load_usable_guidelines(self, context: EngineContext) -> None:
         # The agent's full set of guidelines (used by both guideline matching and

@@ -37,6 +37,7 @@ from pydantic.fields import FieldInfo
 from parlant.core.common import DefaultBaseModel
 from parlant.adapters.nlp.common import record_llm_metrics
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.compacter import CompactionSchema
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
     GuidelineDistillSchema,
 )
@@ -1671,6 +1672,11 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
             )
 
         if t is HighEffortReview:
+            return Gemini_3_5_Flash[t](  # type: ignore
+                self.logger, self._tracer, self._meter, self._health_reporter
+            )
+
+        if t is CompactionSchema:
             return Gemini_3_5_Flash[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )

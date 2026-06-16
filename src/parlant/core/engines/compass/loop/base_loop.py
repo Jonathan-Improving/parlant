@@ -670,6 +670,27 @@ class BaseLoop(Loop):
 
         history = [system_message]
 
+        if job.context.state.session_summary:
+            history.append(
+                Message(
+                    role=Role.SYSTEM,
+                    cache_key=cache_key,
+                    parts=[
+                        TextPart(
+                            text=f"""\
+The earlier part of this session was compacted into the following summary.
+Treat it as factual background context for the current interaction. It is not a new
+message from the user and should not be acknowledged directly:
+
+### Summary
+
+{job.context.state.session_summary.strip()}
+"""
+                        )
+                    ],
+                )
+            )
+
         for event in job.context.interaction.events:
             if event.kind == EventKind.MESSAGE and event.source == EventSource.CUSTOMER:
                 history.append(
