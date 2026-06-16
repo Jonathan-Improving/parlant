@@ -45,8 +45,10 @@ def get_dynamic_effort_level(context: EngineContext) -> Effort:
     return max(efforts, key=lambda effort: _EFFORT_ORDER[effort])
 
 
-def reasoning_effort_for_agent(effort: Effort) -> str:
-    """Map an agent effort level to a model ``reasoning_effort`` hint."""
+def get_dynamic_reasoning_effort(context: EngineContext) -> str:
+    """Map the context's dynamic effort level to a model ``reasoning_effort`` hint."""
+    effort = get_dynamic_effort_level(context)
+
     match effort:
         case Effort.MIN:
             return "minimal"
@@ -58,8 +60,3 @@ def reasoning_effort_for_agent(effort: Effort) -> str:
             return "low"
         case Effort.MAX:
             return "medium"
-
-
-def reasoning_effort_for(context: EngineContext) -> str:
-    """Map the context's dynamic effort level to a model ``reasoning_effort`` hint."""
-    return reasoning_effort_for_agent(get_dynamic_effort_level(context))

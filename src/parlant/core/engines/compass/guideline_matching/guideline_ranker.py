@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from parlant.core.agents import Effort
-from parlant.core.common import DefaultBaseModel, JSONSerializable
+from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.prompt_builder import (
     BuiltInSection,
     EventAdaptationFormat,
@@ -30,9 +30,12 @@ from parlant.core.engines.compass.guideline_matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )
-from parlant.core.engines.compass.common import get_dynamic_effort_level, reasoning_effort_for
+from parlant.core.engines.compass.common import (
+    get_dynamic_effort_level,
+    get_dynamic_reasoning_effort,
+)
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.guidelines import Guideline, GuidelineContent
+from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.nlp.generation_info import GenerationInfo
@@ -80,6 +83,9 @@ class GuidelineRanker:
     """
 
     RELEVANCE_SCORE_THRESHOLD = 4
+    GUIDELINE_CACHE_BREAKPOINT = "- Guideline: ###"
+    REASONING_CACHE_BREAKPOINT = "AGENT'S REASONING SO FAR THIS TURN"
+    STAGED_EVENTS_CACHE_BREAKPOINT = "STAGED EVENTS"
 
     def __init__(
         self,
@@ -144,8 +150,11 @@ class GuidelineRanker:
         inference = await self._schematic_generator.generate(
             prompt=prompt,
             hints={
-                "reasoning_effort": reasoning_effort_for(context),
-                "cache": {"action": "load", "key": self._cache_key(context)},
+                "reasoning_effort": get_dynamic_reasoning_effort(context),
+                "cache": {
+                    "key": self._cache_key(context),
+                    "breakpoint": self._cache_breakpoint(context),
+                },
             },
         )
 
@@ -183,31 +192,42 @@ class GuidelineRanker:
             return f"This guideline ranked {output.s * 2} out of 10 in relevance to your next response."
 
     def _cache_key(self, context: EngineContext) -> str:
-        # Namespace the provider cache per session+nonce AND component, so components
-        # that cache concurrently (e.g. within a matching batch) never clobber a shared
-        # entry. The nonce (minted in CompassEngine.initialize, shared across the
-        # session's turns) is stable across the store (prefill) / load (rank) pair.
-        return f"{context.session.id}.{context.state.cache_nonce}.guideline-ranker"
+        # Namespace the provider cache per session AND component, so components
+        # that cache concurrently (e.g. within a matching batch) never clobber a
+        # shared entry.
+        return f"{context.session.id}.guideline-ranker"
+
+    def _cache_breakpoint(self, context: EngineContext) -> str:
+        if context.state.reasoning_steps:
+            return self.REASONING_CACHE_BREAKPOINT
+        if context.state.tool_events:
+            return self.STAGED_EVENTS_CACHE_BREAKPOINT
+        return self.GUIDELINE_CACHE_BREAKPOINT
 
     async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the ranker's shared prompt prefix.
 
         `rank` fans out one request per guideline concurrently, each repeating the
-        shared prefix. The `cache: store` hint makes a provider that supports
-        explicit caching (Gemini) create a CachedContent for that prefix keyed by
-        the session, so the fan-out's `cache: load` requests reference it and send
-        only their per-guideline suffix. Providers without explicit caching ignore
-        the hint. The throwaway generation here is what triggers the store; the
-        same reasoning_effort is used so the cached variant matches. Best-effort:
-        warming failures must not break preparation."""
+        shared prefix. The cache hint lets providers that support explicit caching
+        (Gemini) cache everything before the first dynamic tail section, so the
+        per-guideline fan-out sends only the live suffix. Providers without explicit
+        caching ignore the hint. The same reasoning_effort is used so the cached
+        variant matches. Best-effort: warming failures must not break preparation."""
         with self._tracer.span("guideline.prefill"):
             try:
-                prompt = self._build_shared_prompt(context, shots=await self.shots())
+                prompt = self._build_prompt(
+                    context,
+                    guideline=self._cache_prefill_guideline(),
+                    shots=await self.shots(),
+                )
                 inference = await self._schematic_generator.generate(
                     prompt=prompt,
                     hints={
-                        "reasoning_effort": reasoning_effort_for(context),
-                        "cache": {"action": "store", "key": self._cache_key(context)},
+                        "reasoning_effort": get_dynamic_reasoning_effort(context),
+                        "cache": {
+                            "key": self._cache_key(context),
+                            "breakpoint": self._cache_breakpoint(context),
+                        },
                     },
                 )
                 return inference.info
@@ -217,6 +237,21 @@ class GuidelineRanker:
 
     async def shots(self) -> Sequence[GuidelineRankingShot]:
         return await shot_collection.list()
+
+    def _cache_prefill_guideline(self) -> Guideline:
+        return Guideline(
+            id=GuidelineId("cache-prefill-guideline"),
+            creation_utc=datetime.now(timezone.utc),
+            last_modified_utc=datetime.now(timezone.utc),
+            content=GuidelineContent(
+                condition="the cache is being warmed before guideline ranking",
+                action="return a low relevance score",
+            ),
+            enabled=True,
+            tags=[],
+            metadata={},
+            criticality=Criticality.LOW,
+        )
 
     def _format_shots(self, context: EngineContext, shots: Sequence[GuidelineRankingShot]) -> str:
         return "\n".join(
@@ -275,9 +310,8 @@ class GuidelineRanker:
         shots: Sequence[GuidelineRankingShot],
     ) -> PromptBuilder:
         # Start from the cross-turn-stable shared prefix, then append the
-        # turn-varying context, the specific guideline, and finally the
-        # output-format note. The guideline is what differs across the per-guideline
-        # fan-out, so everything before it stays byte-identical within a turn.
+        # turn-varying tail. The cache breakpoint points at the first existing
+        # tail section that will be present for this context.
         builder = self._build_shared_prompt(context, shots)
 
         # Per-step reasoning goes in the tail (not the cached shared prefix) so the
@@ -320,8 +354,8 @@ class GuidelineRanker:
         builder.add_section(
             name="guideline-ranker-general-instructions",
             template="""
-GENERAL INSTRUCTIONS
------------------
+# GENERAL INSTRUCTIONS
+
 In our system, a conversational multi-turn AI agent's behavior is controlled by a set of guidelines.
 Each guideline is comprised of a condition and potentially an action. Whenever a condition applies - the agent is directed to take its associated action.
 """,
@@ -330,8 +364,8 @@ Each guideline is comprised of a condition and potentially an action. Whenever a
         builder.add_section(
             name="guideline-ranker-task-description",
             template="""
-Task Description
-----------------
+# Task Description
+
 Act as a first-pass filter to screen out clearly irrelevant guidelines based on their conditions. You are NOT making the final determination - a human judge will review every condition that isn't clearly irrelevant and decide whether it actually applies.
 
 Output an integer score from 1 to 5 indicating how relevant the guideline's condition is to the most recent state of the conversation:
@@ -357,8 +391,8 @@ Important considerations:
         builder.add_section(
             name="guideline-ranker-examples",
             template="""
-Examples of Guideline Ranking Evaluations:
--------------------
+#Examples of Guideline Ranking Evaluations:
+
 {formatted_shots}
 """,
             props={
@@ -384,8 +418,8 @@ Examples of Guideline Ranking Evaluations:
         builder.add_section(
             name="guideline-ranker-output-format",
             template="""
-OUTPUT FORMAT
------------------
+# OUTPUT FORMAT
+
 - Evaluate the guideline by filling in the details in the following structure:
 ```json
 {result_structure_text}

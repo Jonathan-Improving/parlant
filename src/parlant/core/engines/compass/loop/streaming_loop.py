@@ -16,7 +16,7 @@ from io import StringIO
 
 from parlant.core.engines.compass.loop.base_loop import BaseLoop, _LoopState
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.nlp.react import StepCompleted, TextDelta
+from parlant.core.nlp.react import StepCompleted, StreamEvent, TextDelta
 from parlant.core.sessions import MessageEventData, Participant, StatusEventData
 
 
@@ -25,9 +25,14 @@ class StreamingLoop(BaseLoop):
     message event's growing buffer + `chunks`, so consumers can render it as it's
     produced. The final step-completion update null-terminates `chunks`."""
 
-    async def _update_message(self, context: EngineContext, state: _LoopState) -> None:
-        match state.current_event:
-            case TextDelta():
+    async def _update_message(
+        self,
+        context: EngineContext,
+        state: _LoopState,
+        event: StreamEvent,
+    ) -> None:
+        match event:
+            case TextDelta(text=text):
                 if state.message_handle is None:  # First message chunk
                     await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
@@ -35,8 +40,8 @@ class StreamingLoop(BaseLoop):
                     )
 
                     state.message_buffer = StringIO()
-                    state.message_buffer.write(state.current_event.text)
-                    state.message_chunks = [state.current_event.text]
+                    state.message_buffer.write(text)
+                    state.message_chunks = [text]
 
                     state.message_handle = await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
@@ -51,8 +56,8 @@ class StreamingLoop(BaseLoop):
                 else:  # Subsequent message chunk
                     assert state.message_buffer is not None
 
-                    state.message_buffer.write(state.current_event.text)
-                    state.message_chunks.append(state.current_event.text)
+                    state.message_buffer.write(text)
+                    state.message_chunks.append(text)
 
                     state.message_handle = await state.message_handle.update(
                         MessageEventData(

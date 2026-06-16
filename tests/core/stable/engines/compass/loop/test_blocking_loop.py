@@ -28,10 +28,12 @@ from parlant.core.nlp.react import (
     StepResult,
     TextDelta,
     TextPart,
+    ToolCallPart,
     ToolResultPart,
     Usage,
 )
 from parlant.core.sessions import EventKind, EventSource, ToolEventData
+from parlant.core.tools import ToolId, ToolResult
 from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
@@ -63,6 +65,16 @@ class _NoReplayReact:
         return None
 
 
+class _NoopToolMessageReact:
+    def serialize_tool_messages(self, messages: list[Message], serializer: Any) -> None:
+        return None
+
+
+class _StubToolRunner:
+    async def run_tool(self, context: Any, tool_id: ToolId, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(data={"ok": True})
+
+
 def test_that_an_unreplayable_tool_event_is_rendered_as_a_result_not_dropped() -> None:
     # A prior-turn tool event whose provider blob can't be natively replayed must
     # NOT be discarded — that would make the model forget the tool's data across
@@ -92,6 +104,35 @@ def test_that_an_unreplayable_tool_event_is_rendered_as_a_result_not_dropped() -
     assert "delivered" in str(result_part.content)
 
 
+async def test_that_tool_call_step_is_committed_before_tool_results_are_appended() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState(tool_ids_by_name={"test_tool": ToolId("local", "test_tool")})
+
+    loop = _make_blocking_loop()
+    loop._react = cast(Any, _NoopToolMessageReact())
+    loop._tool_runner = cast(Any, _StubToolRunner())
+    state = _LoopState()
+
+    tool_call = ToolCallPart(
+        id="call-1",
+        name="test_tool",
+        args={"value": 1},
+    )
+    result = StepResult(
+        message=Message(role=Role.ASSISTANT, parts=[tool_call]),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    committed = await loop._update_tool_calls(context, state, StepCompleted(result=result))
+
+    assert committed is True
+    assert [m.role for m in state.history] == [Role.ASSISTANT, Role.TOOL]
+    assert state.history[0].tool_calls == [tool_call]
+    assert state.history[1].tool_results[0].content == {"ok": True}
+    assert state.steps == [result]
+
+
 async def test_that_blocking_loop_emits_a_single_complete_message_event_without_chunks() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
@@ -109,8 +150,8 @@ async def test_that_blocking_loop_emits_a_single_complete_message_event_without_
     # them incrementally — the whole message is emitted once on step completion.
     events = [TextDelta(text="Hello "), TextDelta(text="there!"), StepCompleted(result=result)]
     for event in events:
-        await loop._on_new_event(state, event)
-        await loop._update_message(context, state)
+        await loop._update_message(context, state, event)
+        await loop._commit_new_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]

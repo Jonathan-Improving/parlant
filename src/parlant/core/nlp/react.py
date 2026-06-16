@@ -218,6 +218,9 @@ class Message:
     def tool_results(self) -> Sequence[ToolResultPart]:
         return [p for p in self.parts if isinstance(p, ToolResultPart)]
 
+    def __repr__(self) -> str:
+        return f"Message(role={self.role}, text={self.text!r}, reasoning={self.reasoning!r}, tool_calls={self.tool_calls}, tool_results={self.tool_results})"
+
 
 # ──────────────────────── tool-event persistence ports ─────────────────────
 #
@@ -520,6 +523,9 @@ class StepResult:
     @property
     def needs_tools(self) -> bool:
         return bool(self.message.tool_calls)
+
+    def __repr__(self) -> str:
+        return f"StepResult(message={self.message}, finish_reason={self.finish_reason}, usage={self.usage})"
 
 
 @dataclass(kw_only=True)

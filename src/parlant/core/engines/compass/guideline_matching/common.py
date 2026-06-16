@@ -28,8 +28,7 @@ def add_agent_reasoning(builder: PromptBuilder, reasoning_steps: Sequence[str]) 
 
     Added to the per-call tail by callers - NOT the shared prompt - so it stays out
     of the cached prefix: the reasoning grows with every step, whereas the cached
-    prefix must stay byte-stable across the prefill/load pair and across steps.
-    No-op when there's no reasoning yet (e.g. the initial match)."""
+    prefix must stay byte-stable across the prefill/load pair and across steps."""
     if not reasoning_steps:
         return
 
@@ -51,8 +50,8 @@ While preparing the current response, you (the agent) have already reasoned thro
 def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo:
     """Aggregate usage across the per-guideline requests of a fan-out: tokens are
     summed, duration is the max (the requests run concurrently, so it reflects
-    wall-clock, not total work), and cached_input_tokens (in ``extra``, possibly
-    absent) is summed with a 0 default."""
+    wall-clock, not total work), and token breakdowns in ``extra`` (possibly
+    absent) are summed with a 0 default."""
     return GenerationInfo(
         schema_name=infos[0].schema_name,
         model=infos[0].model,
@@ -63,7 +62,10 @@ def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo
             extra={
                 "cached_input_tokens": sum(
                     int((info.usage.extra or {}).get("cached_input_tokens", 0)) for info in infos
-                )
+                ),
+                "reasoning_tokens": sum(
+                    int((info.usage.extra or {}).get("reasoning_tokens", 0)) for info in infos
+                ),
             },
         ),
     )

@@ -18,10 +18,13 @@ from dataclasses import dataclass
 from io import StringIO
 from itertools import chain
 
+from parlant.core.agents import Effort
 from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.alpha.prompt_builder import EventAdaptationFormat, PromptBuilder
-from parlant.core.engines.compass.common import reasoning_effort_for
+from parlant.core.engines.compass.common import (
+    get_dynamic_effort_level,
+)
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
@@ -58,6 +61,8 @@ class Reviewer:
     their arguments would breach policy.
     """
 
+    CACHE_BREAKPOINT = PromptBuilder.INTERACTION_HISTORY_HEADER
+
     def __init__(
         self,
         logger: Logger,
@@ -74,11 +79,19 @@ class Reviewer:
         reasoning: str,
         tool_calls: Sequence[ToolCallPart],
     ) -> ReviewResult:
+        effort = get_dynamic_effort_level(context)
+
         with self._tracer.span("tool_calls.review"):
             inference = await self._schematic_generator.generate(
                 prompt=self._build_prompt(context, reasoning, tool_calls),
                 hints={
-                    "reasoning_effort": reasoning_effort_for(context),
+                    "reasoning_effort": "minimal"
+                    if effort not in (Effort.HIGH, Effort.MAX)
+                    else "low",
+                    "cache": {
+                        "key": self._cache_key(context),
+                        "breakpoint": self.CACHE_BREAKPOINT,
+                    },
                 },
             )
 
@@ -96,13 +109,12 @@ class Reviewer:
 
             if result.breaches:
                 self._logger.debug(
-                    f"{self.__class__.__name__} intercepted policy violation(s):\n"
+                    f"{self.__class__.__name__} intercepted policy violation(s):\n\n"
                     f"{self._format_review_log(result)}"
                 )
             else:
-                self._logger.trace(
-                    f"{self.__class__.__name__} tool-call review result:\n"
-                    f"{self._format_review_log(result)}"
+                self._logger.debug(
+                    f"{self.__class__.__name__} usage:\n{self._format_review_log(result)}"
                 )
 
             return result
@@ -150,10 +162,11 @@ Do NOT write "adjusted_reasoning" as a critique of the failed attempt. Avoid phr
 Write it as first-person corrected reasoning that can replace the violating reasoning. It should stand alone as the reasoning the agent should proceed from now.
 
 Bad: "The agent failed to identify a new variant. It should ask the user to choose one."
-Good: "The customer wants to exchange the delivered office chair. The exchange policy allows exchanging a delivered item only for an available new item of the same product with a different product option, and requires explicit confirmation of the chosen replacement. The current item ID 8069050545 is the item being returned, so it cannot be used as the replacement item ID. I do not yet have a user-confirmed different replacement variant. I should not call exchange_delivered_order_items yet; I should present the available different office-chair variants and ask the customer which replacement they want."
+Good: "Customer wants to exchange delivered office chair. Exchange policy allows exchanging a delivered item only for available new item of same product with different product option, and requires explicit confirmation of chosen replacement. Current item ID 8069050545 is the item being returned, so it cannot be used as replacement item ID. I do not yet have a user-confirmed different replacement variant. I should not call exchange_delivered_order_items yet; I should present the available different office-chair variants and ask the customer which replacement they want."
+
 
 Bad: "The agent used an unsupported account ID."
-Good: "The customer wants an account action, but the required account ID must be provided by the customer and is not present in the interaction. I should not call update_account yet. I should ask the customer for their account ID before attempting the tool call."
+Good: "Customer wants account action, but required account ID must be provided by the customer and not present in interaction. I should not call update_account yet. I should ask customer for their account ID before attempting the tool call."
 """,
         )
 
@@ -162,7 +175,8 @@ Good: "The customer wants an account action, but the required account ID must be
             template="""
 # OUTPUT FORMAT
 
-Return your decision using exactly this structure:
+Return your decision using exactly this structure, being as concise as possible in your explanations to avoid verbosity that could dilute the key points:
+`
 ```json
 {result_structure_text}
 ```
@@ -188,8 +202,6 @@ The AI agent was required to follow these instructions:
             },
         )
 
-        builder.add_staged_tool_events(context.state.tool_events)
-
         builder.add_section(
             name="reviewer-available-tools",
             template="""
@@ -210,6 +222,8 @@ These are all tools currently available to the agent, including their argument r
             context.interaction.events, format=EventAdaptationFormat.ROLE_SCRIPT
         )
 
+        builder.add_staged_tool_events(context.state.tool_events)
+
         guidelines = {
             m.guideline.id: m.guideline
             for m in chain(
@@ -224,20 +238,19 @@ These are all tools currently available to the agent, including their argument r
             guidelines,
         )
 
-        if context.state.reasoning_steps:
-            builder.add_section(
-                name="reviewer-previous-agent-reasoning",
-                template="""
+        builder.add_section(
+            name="reviewer-previous-agent-reasoning",
+            template="""
 # PREVIOUS AGENT REASONING THIS TURN
 
 The agent's reasoning steps from previous completed steps in this turn are as follows:
 
 {reasoning_steps}
 """,
-                props={
-                    "reasoning_steps": self._format_reasoning_steps(context.state.reasoning_steps),
-                },
-            )
+            props={
+                "reasoning_steps": self._format_reasoning_steps(context.state.reasoning_steps),
+            },
+        )
 
         if context.state.todo.strip():
             builder.add_section(
@@ -288,6 +301,9 @@ These calls have not been executed yet and you need to review them for correctne
         )
 
         return builder
+
+    def _cache_key(self, context: EngineContext) -> str:
+        return f"{context.session.id}.reviewer"
 
     def _build_system_instructions(
         self,

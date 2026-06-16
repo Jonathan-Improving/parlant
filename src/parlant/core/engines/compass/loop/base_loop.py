@@ -126,8 +126,6 @@ class SessionToolMessageDeserializer(ToolMessageDeserializer):
 class _LoopState:
     start_time: float = field(default_factory=asyncio.get_event_loop().time)
 
-    current_event: StreamEvent | None = None
-
     history: list[Message] = field(default_factory=list)
     # Index of the turn-instructions message in `history`, so it can be replaced
     # in place when guidelines are reevaluated between steps. Stable because the
@@ -214,22 +212,13 @@ class BaseLoop(Loop):
         state = _LoopState(history=history, instructions_index=instructions_index)
 
         while not job.context.state.prepared_to_respond:
-            # After the first step, refresh the turn instructions in place: this
-            # re-invokes the rematch callback (reevaluating guidelines gated on the
-            # tools that ran) and swaps just the instructions message — the rest of
-            # the step history is preserved.
-            if (
-                state.instructions_index is not None
-                and job.step_instructions is not None
-                and job.context.state.iterations
-            ):
-                for _ in range(self._max_semantic_failures(job)):
-                    try:
-                        await self._run_step(job, state)
-                    except _SemanticFailure:
-                        continue
-                    else:
-                        break
+            for _ in range(self._max_semantic_failures(job)):
+                try:
+                    await self._run_step(job, state)
+                except _SemanticFailure:
+                    continue
+                else:
+                    break
 
             job.context.state.iterations.append(
                 IterationState(
@@ -243,7 +232,7 @@ class BaseLoop(Loop):
 
             if len(job.context.state.iterations) >= 30:
                 self._logger.warning(
-                    f"Large number of engine iterations on session {job.context.session.id} ({job.context.session.title or 'Untitled'})"
+                    f"Large number of engine iterations on session {job.context.session.id} ({job.context.session.title or 'Untitled'}):\n{state.steps}"
                 )
 
             if len(job.context.state.iterations) == job.context.agent.max_engine_iterations:
@@ -300,10 +289,11 @@ class BaseLoop(Loop):
                     hints={"model_size": job.model_size},
                 ):
                     produced = True
-                    await self._on_new_event(state, event)
-                    await self._update_reasoning(job.context, state)
-                    await self._update_tool_calls(job.context, state)
-                    await self._update_message(job.context, state)
+                    await self._update_reasoning(job.context, state, event)
+                    committed = await self._update_tool_calls(job.context, state, event)
+                    await self._update_message(job.context, state, event)
+                    if not committed:
+                        await self._commit_new_event(state, event)
 
                 return
             except ReactError as exc:
@@ -319,9 +309,7 @@ class BaseLoop(Loop):
     async def _get_tools(self, context: EngineContext) -> list[ToolSpec]:
         return [*tool_specs_from_tools(context.state.available_tools)]
 
-    async def _on_new_event(self, state: _LoopState, event: StreamEvent) -> None:
-        state.current_event = event
-
+    async def _commit_new_event(self, state: _LoopState, event: StreamEvent) -> None:
         if isinstance(event, StepCompleted):
             state.history.append(event.result.message)
             state.steps.append(event.result)
@@ -330,15 +318,21 @@ class BaseLoop(Loop):
                 self._logger.trace(
                     f"{self.__class__.__name__} step reasoning:\n {event.result.message.reasoning}"
                 )
+
             self._logger.debug(f"{self.__class__.__name__} step usage:\n {event.result.usage}")
 
-    async def _update_reasoning(self, context: EngineContext, state: _LoopState) -> None:
-        match state.current_event:
-            case ReasoningDelta():
+    async def _update_reasoning(
+        self,
+        context: EngineContext,
+        state: _LoopState,
+        event: StreamEvent,
+    ) -> None:
+        match event:
+            case ReasoningDelta(text=text):
                 if state.reasoning_handle is None:  # First reasoning chunk
                     state.reasoning_buffer = StringIO()
-                    state.reasoning_buffer.write(state.current_event.text)
-                    state.reasoning_chunks = [state.current_event.text]
+                    state.reasoning_buffer.write(text)
+                    state.reasoning_chunks = [text]
 
                     state.reasoning_handle = await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
@@ -351,8 +345,8 @@ class BaseLoop(Loop):
                 else:  # Subsequent reasoning chunk
                     assert state.reasoning_buffer is not None
 
-                    state.reasoning_buffer.write(state.current_event.text)
-                    state.reasoning_chunks.append(state.current_event.text)
+                    state.reasoning_buffer.write(text)
+                    state.reasoning_chunks.append(text)
 
                     state.reasoning_handle = await state.reasoning_handle.update(
                         StatusEventData(
@@ -397,8 +391,13 @@ class BaseLoop(Loop):
                 state.reasoning_chunks = []
                 state.reasoning_handle = None
 
-    async def _update_tool_calls(self, context: EngineContext, state: _LoopState) -> None:
-        match state.current_event:
+    async def _update_tool_calls(
+        self,
+        context: EngineContext,
+        state: _LoopState,
+        event: StreamEvent,
+    ) -> bool:
+        match event:
             case ToolCallStarted():
                 if not state.in_the_middle_of_running_tools:
                     await context.session_event_emitter.emit_status_event(
@@ -407,6 +406,7 @@ class BaseLoop(Loop):
                     )
 
                 state.in_the_middle_of_running_tools = True
+                return False
             case StepCompleted(result=result) if result.needs_tools:
                 adjusted_reasoning = await self._review_tool_calls(
                     context,
@@ -427,6 +427,10 @@ class BaseLoop(Loop):
                 else:
                     context.state.step_notes = ""
 
+                # Approved tool calls must be committed before their tool results
+                # are appended, preserving the provider-required assistant-tool order.
+                await self._commit_new_event(state, event)
+
                 if len(result.tool_calls) == 1:
                     await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
@@ -442,8 +446,10 @@ class BaseLoop(Loop):
                     )
 
                 await self._run_tool_calls(context, state, result.tool_calls)
+                return True
             case _:
                 state.in_the_middle_of_running_tools = False
+                return False
 
     async def _review_tool_calls(
         self,
@@ -629,7 +635,12 @@ class BaseLoop(Loop):
         return await self._tool_runner.run_tool(context, tool_id, tool_call.args)
 
     @abstractmethod
-    async def _update_message(self, context: EngineContext, state: _LoopState) -> None:
+    async def _update_message(
+        self,
+        context: EngineContext,
+        state: _LoopState,
+        event: StreamEvent,
+    ) -> None:
         """Surface the assistant's message for the current stream event.
 
         This is the sole output-mode-specific step: a streaming loop emits the

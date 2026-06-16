@@ -344,14 +344,28 @@ We do not yet know their identity
 
         return self
 
-    _INTERACTION_BODY = """
+    INTERACTION_HISTORY_HEADER = "# Interaction History"
+
+    _INTERACTION_BODY_JSON = f"""\
+{INTERACTION_HISTORY_HEADER}
+
 The following is a list of events describing the most recent state of the back-and-forth
 interaction between you and a user: ###
-{interaction_events}
+{{interaction_events}}
 ###
 """
 
-    _EMPTY_HISTORY = """
+    _INTERACTION_BODY_SCRIPT = f"""\
+{INTERACTION_HISTORY_HEADER}
+
+The following is a list of events describing the most recent state of the back-and-forth
+interaction between you and a user:
+{{interaction_events}}
+"""
+
+    _EMPTY_HISTORY = f"""
+{INTERACTION_HISTORY_HEADER}
+
 Your interaction with the user has just began, and no events have been recorded yet.
 Proceed with your task accordingly.
 """
@@ -383,9 +397,14 @@ Proceed with your task accordingly.
         self,
         interaction_events: list[str],
         last_event_note: str | None = None,
+        format: EventAdaptationFormat = EventAdaptationFormat.JSON,
     ) -> None:
-        template = self._INTERACTION_BODY
-        props: dict[str, Any] = {"interaction_events": "\n".join(interaction_events)}
+        if format == EventAdaptationFormat.JSON:
+            template = self._INTERACTION_BODY_JSON
+            props = {"interaction_events": "\n".join(interaction_events)}
+        else:
+            template = self._INTERACTION_BODY_SCRIPT
+            props = {"interaction_events": "\n".join(interaction_events)}
 
         if last_event_note:
             template += "{last_event_note}\n"
@@ -413,7 +432,7 @@ Proceed with your task accordingly.
     ) -> PromptBuilder:
         if events:
             interaction_events = self._gather_interaction_events(events, staged_events, format)
-            self._add_history_section(interaction_events=interaction_events)
+            self._add_history_section(interaction_events=interaction_events, format=format)
         else:
             self._add_empty_history_section()
 

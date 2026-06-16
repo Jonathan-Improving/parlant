@@ -50,13 +50,6 @@ class ResponseState:
     available_tools: list[Tool] = field(default_factory=list)
     tool_ids_by_name: dict[str, ToolId] = field(default_factory=dict)  # to run a tool by its name
 
-    # Per-session nonce minted by the engine (see CompassEngine._resolve_cache_nonce).
-    # Matching components fold it into their provider-cache key so a turn's
-    # `cache: load` finds the prefix stored by the previous turn's `cache: store`,
-    # while keeping the key decoupled from (and rotatable independently of) the
-    # session id.
-    cache_nonce: str = ""
-
     # The agent's reasoning from each step of the response loop so far this turn,
     # in order. The loop appends to it after every step; the matching components
     # (ranker, distiller) feed it into their per-guideline prompts so each step's

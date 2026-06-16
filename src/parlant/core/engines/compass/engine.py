@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import MutableMapping, Sequence
+from collections.abc import Sequence
 import traceback
-import uuid
 from typing_extensions import override
 
-from cachetools import LRUCache
-
-from parlant.core.async_utils import safe_gather, delay
+from parlant.core.async_utils import delay
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.emissions import EventEmitter
 from parlant.core.engines.entity_context import EntityContext
@@ -33,7 +30,7 @@ from parlant.core.engines.types import Context, Engine, UtteranceRequest
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
 from parlant.core.meter import Meter
-from parlant.core.sessions import SessionId, StatusEventData
+from parlant.core.sessions import StatusEventData
 from parlant.core.tracer import Tracer
 
 
@@ -60,18 +57,6 @@ class CompassEngine(Engine):
         self._entity_queries = entity_queries
         self._hooks = hooks
 
-        # Per-session provider-cache nonce, minted in initialize() and shared
-        # across that session's process() turns so a turn's `cache: load` matches
-        # the prefix the previous turn's `cache: store` wrote. In-memory and bound
-        # in size — it dies with the process, exactly like the provider caches it
-        # keys; a miss (restart/eviction) just re-warms under a fresh nonce.
-        self._session_cache_nonces: MutableMapping[SessionId, str] = LRUCache(maxsize=1024)
-
-    def _resolve_cache_nonce(self, session_id: SessionId, *, fresh: bool) -> str:
-        if fresh or session_id not in self._session_cache_nonces:
-            self._session_cache_nonces[session_id] = uuid.uuid4().hex
-        return self._session_cache_nonces[session_id]
-
     @override
     async def initialize(
         self,
@@ -87,25 +72,8 @@ class CompassEngine(Engine):
             load_interaction=False,
         )
 
-        # Mint this session's cache nonce; the prefills below store under it, and
-        # the session's later process() turns load under the same value.
-        engine_context.state.cache_nonce = self._resolve_cache_nonce(
-            engine_context.session.id, fresh=True
-        )
-
-        # Warm the response state (mostly the tool pool — the interaction is empty,
-        # so guideline matching has little to chew on) for the prefills below.
         await self._load_usable_guidelines(engine_context)
-        await self._matcher.fill(engine_context)
-
-        # Warm the responder's and the guideline ranker's caches in parallel — both
-        # only need the (now-prepared) state, and neither depends on the other.
-        # TODO: This should prepare EITHER the responder OR the task runner,
-        # depending on the effort level and context
-        await safe_gather(
-            self._responder.prefill(engine_context),
-            self._matcher.prefill(engine_context),
-        )
+        await self._responder.prefill(engine_context)
 
     @override
     async def process(
@@ -116,13 +84,6 @@ class CompassEngine(Engine):
         # Load the context up front so the error hook (and the lifecycle hooks
         # below) always have it, mirroring the alpha engine.
         engine_context = await self._load_context(context, event_emitter)
-
-        # Reuse the nonce minted in initialize() so this turn's `cache: load`
-        # matches the prefix the previous turn's `cache: store` wrote; mint one on
-        # a miss (e.g. after a restart or eviction) so caching just re-warms.
-        engine_context.state.cache_nonce = self._resolve_cache_nonce(
-            engine_context.session.id, fresh=False
-        )
 
         try:
             if not await self._hooks.call_on_acknowledging(engine_context):
@@ -157,14 +118,6 @@ class CompassEngine(Engine):
             # response loop) need the matches already in place.
             await self._matcher.fill(engine_context)
 
-            # TODO
-            # await self._task_runner.run(
-            #    Task(
-            #        context=engine_context,
-            #        instructions="",
-            #    )
-            # )
-
             # The responder re-invokes _refresh_state when (re)building the turn
             # instructions after each step, to reevaluate guidelines gated on the
             # tools that just ran.
@@ -181,12 +134,6 @@ class CompassEngine(Engine):
                 )
 
             return False
-        finally:
-            # Re-warm the guideline ranker's cache for the next turn now that the
-            # response is out — keeping it off the user-facing critical path while
-            # refreshing the (per-session, TTL-bound) cache so the next turn's
-            # fan-out hits it. Best-effort; prefill swallows its own failures.
-            await self._matcher.prefill(engine_context)
 
         return True
 

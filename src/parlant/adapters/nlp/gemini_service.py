@@ -258,10 +258,11 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
         cache_hint = hints.get("cache") or {}
         cache_action = cache_hint.get("action")
         cache_key = cache_hint.get("key")
+        cache_breakpoint = cache_hint.get("breakpoint")
 
-        # STORE: create/refresh the cache for this key as a side effect, then fall
-        # through to a normal generation that still returns a (throwaway) result.
-        if cache_action == "store" and cache_key:
+        # Backward-compatible STORE without a breakpoint: create/refresh the whole
+        # prompt as a side effect, then fall through to a normal inline generation.
+        if cache_action == "store" and cache_key and not cache_breakpoint:
             await self._store_cache(
                 key=cache_key,
                 prefix_text=prompt,
@@ -270,21 +271,42 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                 tool_config=tool_config,
             )
 
-        # LOAD: reuse a cache for this key while the prompt still starts with the
-        # cached prefix; send only the live suffix and reference the cache.
+        # Declarative caching: if a breakpoint is supplied, cache the prefix before
+        # the first marker occurrence and send the marker+tail live. If the cache
+        # already exists for this exact prefix hash, reuse it; otherwise create it
+        # best-effort and use it for this same generation.
         cached_content_name: Optional[str] = None
+        cached_lookup_key: Optional[str] = None
         contents: str = prompt
-        if cache_action == "load" and cache_key:
+        if cache_key and cache_breakpoint:
+            cache_plan = self._split_prompt_at_breakpoint(prompt, str(cache_breakpoint))
+            if cache_plan is not None:
+                prefix_text, live_suffix = cache_plan
+                cached_lookup_key = self._cache_lookup_key(
+                    cache_key,
+                    self._prefix_hash(prefix_text, tools, tool_config),
+                )
+                cached_content_name = await self._get_or_create_cache(
+                    key=cache_key,
+                    lookup_key=cached_lookup_key,
+                    prefix_text=prefix_text,
+                    ttl_seconds=int(cache_hint.get("ttl", self._DEFAULT_CACHE_TTL_SECONDS)),
+                    tools=tools,
+                    tool_config=tool_config,
+                )
+                contents = live_suffix if cached_content_name is not None else prompt
+        elif cache_action == "load" and cache_key:
             plan = self._plan_load(cache_key, prompt)
             if plan is not None:
                 cached_content_name, contents = plan
+                cached_lookup_key = cache_key
 
         config_kwargs: dict[str, Any] = {
             **gemini_api_arguments,
             "max_output_tokens": self._MAX_OUTPUT_TOKENS,
         }
         if cached_content_name is not None:
-            # system_instruction / tools / tool_config are baked into the cache;
+            # cached prefix contents / tools / tool_config are baked into the cache;
             # Gemini rejects setting them inline on a cached request.
             config_kwargs["cached_content"] = cached_content_name
         else:
@@ -316,8 +338,8 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
             self.logger.debug(
                 f"Gemini cache {cached_content_name} unavailable ({exc}); retrying without it."
             )
-            if cache_key:
-                await self._forget_cache(cache_key, cached_content_name)
+            if cached_lookup_key:
+                await self._forget_cache(cached_lookup_key, cached_content_name)
             cached_content_name = None
             response = await self._client.aio.models.generate_content(
                 model=self.model_name,
@@ -361,6 +383,10 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                 else 0,
             )
 
+            reasoning_tokens = (
+                response.usage_metadata.thoughts_token_count or 0 if response.usage_metadata else 0
+            )
+
             return SchematicGenerationResult(
                 content=model_content,
                 info=GenerationInfo(
@@ -370,14 +396,15 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                     usage=UsageInfo(
                         input_tokens=response.usage_metadata.prompt_token_count or 0,
                         output_tokens=(response.usage_metadata.candidates_token_count or 0)
-                        + (response.usage_metadata.thoughts_token_count or 0),
+                        + reasoning_tokens,
                         extra={
                             "cached_input_tokens": (
                                 response.usage_metadata.cached_content_token_count or 0
                                 if response.usage_metadata
                                 else 0
                             )
-                            or 0
+                            or 0,
+                            "reasoning_tokens": reasoning_tokens,
                         },
                     )
                     if response.usage_metadata
@@ -453,6 +480,32 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
         hasher.update(tool_config.model_dump_json(exclude_none=True).encode("utf-8"))
         return hasher.hexdigest()
 
+    def _cache_lookup_key(self, key: str, prefix_hash: str) -> str:
+        return f"{key}:{prefix_hash}"
+
+    def _split_prompt_at_breakpoint(
+        self, prompt: str, breakpoint: str
+    ) -> Optional[tuple[str, str]]:
+        index = prompt.find(breakpoint)
+        if index < 0:
+            self.logger.debug(
+                f"Gemini schematic cache breakpoint {breakpoint!r} was not found; "
+                "proceeding without caching."
+            )
+            return None
+
+        prefix_text = prompt[:index]
+        suffix_text = prompt[index:]
+
+        if not prefix_text or not suffix_text:
+            self.logger.debug(
+                f"Gemini schematic cache breakpoint {breakpoint!r} did not split "
+                "the prompt into a cacheable prefix and live suffix; proceeding without caching."
+            )
+            return None
+
+        return prefix_text, suffix_text
+
     def _plan_load(self, key: str, prompt: str) -> Optional[tuple[str, str]]:
         """Resolve a cached prefix for `key` into (cache_name, live_suffix), or
         None when there's no usable cache: unknown key, within the expiry margin,
@@ -474,6 +527,42 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
 
         return name, suffix
 
+    async def _get_or_create_cache(
+        self,
+        *,
+        key: str,
+        lookup_key: str,
+        prefix_text: str,
+        ttl_seconds: int,
+        tools: list[google.genai.types.Tool],
+        tool_config: google.genai.types.ToolConfig,
+    ) -> Optional[str]:
+        prefix_hash = self._prefix_hash(prefix_text, tools, tool_config)
+
+        async with self._cache_lock:
+            if prefix_hash in self._uncacheable_prefixes:
+                return None
+
+            entry = self._managed_caches.get(lookup_key)
+            if entry is not None:
+                name, _prefix_text, expiry = entry
+                if expiry - datetime.now(timezone.utc) > self._CACHE_REUSE_MARGIN:
+                    return name
+
+            cached_name = await self._create_cache(
+                display_name=lookup_key,
+                prefix_hash=prefix_hash,
+                prefix_text=prefix_text,
+                ttl_seconds=ttl_seconds,
+                tools=tools,
+                tool_config=tool_config,
+            )
+            if cached_name is None:
+                return None
+
+            entry = self._managed_caches.get(lookup_key)
+            return entry[0] if entry is not None else None
+
     async def _store_cache(
         self,
         *,
@@ -483,51 +572,69 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
         tools: list[google.genai.types.Tool],
         tool_config: google.genai.types.ToolConfig,
     ) -> None:
-        """Create (or refresh) an explicit CachedContent holding `prefix_text` as
-        the system instruction plus the output tool, registered under `key` for a
-        later load. Caching is an optimization, so this never raises: a prefix
-        Gemini rejects (e.g. below the token minimum) is remembered and skipped,
-        and a transient failure just leaves the key uncached this turn."""
+        """Create (or refresh) an explicit CachedContent holding `prefix_text`
+        plus the output tool, registered under `key` for a later load. Caching is
+        an optimization, so this never raises: a prefix Gemini rejects (e.g. below
+        the token minimum) is remembered and skipped, and a transient failure just
+        leaves the key uncached this turn."""
         prefix_hash = self._prefix_hash(prefix_text, tools, tool_config)
 
         async with self._cache_lock:
             if prefix_hash in self._uncacheable_prefixes:
                 return
 
-            config = google.genai.types.CreateCachedContentConfig(
+            await self._create_cache(
                 display_name=key,
-                system_instruction=prefix_text,
+                prefix_hash=prefix_hash,
+                prefix_text=prefix_text,
+                ttl_seconds=ttl_seconds,
                 tools=tools,
                 tool_config=tool_config,
-                ttl=f"{ttl_seconds}s",
             )
 
-            try:
-                cached = await self._client.aio.caches.create(model=self.model_name, config=config)
-            except ClientError as exc:
-                # Deterministic rejection (e.g. prefix below the minimum token
-                # count): this prefix will never cache, so stop retrying it.
-                self.logger.warning(
-                    f"Gemini rejected schematic caching for key '{key}' "
-                    f"({exc}); proceeding without caching."
-                )
-                self._uncacheable_prefixes.add(prefix_hash)
-                return
-            except Exception as exc:  # noqa: BLE001 - transient: degrade, retry later
-                self.logger.warning(
-                    f"Gemini schematic cache creation failed for key '{key}' "
-                    f"({exc}); proceeding without caching."
-                )
-                return
+    async def _create_cache(
+        self,
+        *,
+        display_name: str,
+        prefix_hash: str,
+        prefix_text: str,
+        ttl_seconds: int,
+        tools: list[google.genai.types.Tool],
+        tool_config: google.genai.types.ToolConfig,
+    ) -> Optional[str]:
+        config = google.genai.types.CreateCachedContentConfig(
+            display_name=display_name,
+            contents=prefix_text,
+            tools=tools,
+            tool_config=tool_config,
+            ttl=f"{ttl_seconds}s",
+        )
 
-            assert cached.name and cached.expire_time
+        try:
+            cached = await self._client.aio.caches.create(model=self.model_name, config=config)
+        except ClientError as exc:
+            # Deterministic rejection (e.g. prefix below the minimum token count):
+            # this prefix will never cache, so stop retrying it.
+            self.logger.warning(
+                f"Gemini rejected schematic caching for key '{display_name}' "
+                f"({exc}); proceeding without caching."
+            )
+            self._uncacheable_prefixes.add(prefix_hash)
+            return None
+        except Exception as exc:  # noqa: BLE001 - transient: degrade, retry later
+            self.logger.warning(
+                f"Gemini schematic cache creation failed for key '{display_name}' "
+                f"({exc}); proceeding without caching."
+            )
+            return None
 
-            # Register the new cache as this key's current one. We deliberately do
-            # NOT delete the prior cache: a concurrent load may still be referencing
-            # it, and deleting it out from under that load would 403 the request.
-            # The old resource simply lapses at its TTL; loads always read the
-            # latest entry here.
-            self._managed_caches[key] = (cached.name, prefix_text, cached.expire_time)
+        assert cached.name and cached.expire_time
+
+        # Register the new cache under the fully resolved lookup identity. We
+        # deliberately do NOT delete prior caches: a concurrent request may still
+        # reference one, and old resources simply lapse at their TTL.
+        self._managed_caches[display_name] = (cached.name, prefix_text, cached.expire_time)
+        return cached.name
 
     def _is_missing_cache_error(self, error: ClientError) -> bool:
         """Whether a request failed because its referenced CachedContent is gone

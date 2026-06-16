@@ -19,16 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from parlant.core.common import DefaultBaseModel, JSONSerializable
+from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.compass.guideline_matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )
-from parlant.core.engines.compass.common import reasoning_effort_for
+from parlant.core.engines.compass.common import get_dynamic_reasoning_effort
 from parlant.core.engines.compass.response_state import EngineContext
-from parlant.core.guidelines import Guideline, GuidelineContent
+from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.nlp.generation_info import GenerationInfo
@@ -79,6 +79,10 @@ class GuidelineDistiller:
     evaluated in its own prompt.
     """
 
+    GUIDELINE_CACHE_BREAKPOINT = "- Guideline: ###"
+    REASONING_CACHE_BREAKPOINT = "AGENT'S REASONING SO FAR THIS TURN"
+    STAGED_EVENTS_CACHE_BREAKPOINT = "STAGED EVENTS"
+
     def __init__(
         self,
         logger: Logger,
@@ -125,8 +129,11 @@ class GuidelineDistiller:
         inference = await self._schematic_generator.generate(
             prompt=prompt,
             hints={
-                "reasoning_effort": reasoning_effort_for(context),
-                "cache": {"action": "load", "key": self._cache_key(context)},
+                "reasoning_effort": get_dynamic_reasoning_effort(context),
+                "cache": {
+                    "key": self._cache_key(context),
+                    "breakpoint": self._cache_breakpoint(context),
+                },
             },
         )
 
@@ -141,25 +148,37 @@ class GuidelineDistiller:
         )
 
     def _cache_key(self, context: EngineContext) -> str:
-        # Namespace the provider cache per session+nonce AND component, so components
-        # that cache concurrently never clobber a shared entry. The nonce (minted in
-        # CompassEngine.initialize, shared across the session's turns) is stable across
-        # the store (prefill) / load (distill) pair.
-        return f"{context.session.id}.{context.state.cache_nonce}.guideline-distiller"
+        # Namespace the provider cache per session AND component, so components
+        # that cache concurrently never clobber a shared entry.
+        return f"{context.session.id}.guideline-distiller"
+
+    def _cache_breakpoint(self, context: EngineContext) -> str:
+        if context.state.reasoning_steps:
+            return self.REASONING_CACHE_BREAKPOINT
+        if context.state.tool_events:
+            return self.STAGED_EVENTS_CACHE_BREAKPOINT
+        return self.GUIDELINE_CACHE_BREAKPOINT
 
     async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the distiller's shared prompt prefix, so
-        the per-guideline fan-out's `cache: load` requests hit it. The throwaway
-        generation triggers the `cache: store`. Best-effort: warming failures must
-        not break preparation. See :meth:`GuidelineRanker.prefill`."""
+        the per-guideline fan-out can send only its live suffix. Best-effort:
+        warming failures must not break preparation. See
+        :meth:`GuidelineRanker.prefill`."""
         with self._tracer.span("guideline.distill-prefill"):
             try:
-                prompt = self._build_shared_prompt(context, shots=await self.shots())
+                prompt = self._build_prompt(
+                    context,
+                    guideline=self._cache_prefill_guideline(),
+                    shots=await self.shots(),
+                )
                 inference = await self._schematic_generator.generate(
                     prompt=prompt,
                     hints={
-                        "reasoning_effort": reasoning_effort_for(context),
-                        "cache": {"action": "store", "key": self._cache_key(context)},
+                        "reasoning_effort": get_dynamic_reasoning_effort(context),
+                        "cache": {
+                            "key": self._cache_key(context),
+                            "breakpoint": self._cache_breakpoint(context),
+                        },
                     },
                 )
                 return inference.info
@@ -169,6 +188,21 @@ class GuidelineDistiller:
 
     async def shots(self) -> Sequence[GuidelineDistillationShot]:
         return await shot_collection.list()
+
+    def _cache_prefill_guideline(self) -> Guideline:
+        return Guideline(
+            id=GuidelineId("cache-prefill-guideline"),
+            creation_utc=datetime.now(timezone.utc),
+            last_modified_utc=datetime.now(timezone.utc),
+            content=GuidelineContent(
+                condition="the cache is being warmed before guideline distillation",
+                action="determine that no real customer guidance is required",
+            ),
+            enabled=True,
+            tags=[],
+            metadata={},
+            criticality=Criticality.LOW,
+        )
 
     def _format_shots(self, shots: Sequence[GuidelineDistillationShot]) -> str:
         return "\n".join(
@@ -225,10 +259,9 @@ class GuidelineDistiller:
         guideline: Guideline,
         shots: Sequence[GuidelineDistillationShot],
     ) -> PromptBuilder:
-        # The cross-turn/within-turn-stable shared prefix, then the per-guideline
-        # tail: staged tool events and the specific guideline (with its tools). The
-        # guideline is what differs across the fan-out, so everything before it stays
-        # byte-identical within a turn — the prefix `prefill` warms.
+        # The cross-turn/within-turn-stable shared prefix, then the turn-varying
+        # tail. The cache breakpoint points at the first existing tail section
+        # that will be present for this context.
         builder = self._build_shared_prompt(context, shots)
 
         # Per-step reasoning goes in the tail (not the cached shared prefix) so the
@@ -320,6 +353,8 @@ Internal verification instructions ("make sure the rules apply before doing X") 
 Some of the guidance may already have been carried out, in full or in part, earlier in the conversation. In that case, output only the part that still needs to be carried out now. If it was already fully carried out and its condition has not arisen again for a new reason, there is nothing left to do, so the guideline is not relevant (set "is_relevant" to false). If the condition has arisen again for a new reason (a new or subtly different context), the guidance should be applied again for that new occurrence. Be conservative about repeating guidance that delivers static, one-time information (e.g. "send our address"): only repeat it if the condition genuinely arose again.
 
 If a flow has returned to an earlier stage (e.g. the customer corrects something they said earlier), don't just take the step that literally follows the changed point. Skip any later steps whose information you already have and that is still valid, and jump forward to the next step that genuinely still needs doing.
+When the correction changes the target entity, account, person, product, or subject of the flow, carry that changed target explicitly into the distilled action. Do not collapse it to only an identifier if the conversation supplies a meaningful label or relationship for it. Include both when both are known; for example, prefer "ask for the email address for the husband's account 123655" over "ask for the email address for account 123655".
+When a step asks you to classify the user's issue, intent, target, or situation, do not ask the classification question if the conversation already provides enough information to infer it. Treat that classification step as complete and advance to the next step for the inferred category.
 
 Be relevant-complete but selective: include everything that genuinely bears on the next response, and exclude everything that doesn't. Don't return a generic restatement of the action when the detailed instructions let you be specific; but equally, don't dump the whole guideline verbatim or bundle in steps and rules that aren't yet relevant, and never overwhelm the customer. When a single next step is all that applies, return just that step.
 
