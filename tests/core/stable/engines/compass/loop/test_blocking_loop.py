@@ -29,6 +29,7 @@ from parlant.core.nlp.react import (
     TextDelta,
     TextPart,
     ToolCallPart,
+    ToolCallStarted,
     ToolResultPart,
     Usage,
 )
@@ -165,3 +166,52 @@ async def test_that_blocking_loop_emits_a_single_complete_message_event_without_
 
     # A completed message with no tool calls ends the loop.
     assert context.state.prepared_to_respond is True
+
+
+async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separate_messages() -> (
+    None
+):
+    # TEXT, TOOL, TEXT within ONE step: the pre-tool and post-tool text must be TWO
+    # separate message events. Block mode emits result.message.text once, and
+    # TurnBuilder folds both segments into a single TextPart, so they arrive glued
+    # ("flights.There are") with no break between them.
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+
+    loop = _make_blocking_loop()
+    state = _LoopState()
+
+    # As TurnBuilder assembles it: both text segments fold into ONE TextPart, with
+    # the tool call sitting after them in part order.
+    result = StepResult(
+        message=Message(
+            role=Role.ASSISTANT,
+            parts=[
+                TextPart(text="Let me search for direct flights. There are no direct flights."),
+                ToolCallPart(id="call-1", name="search_flights"),
+            ],
+        ),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    events = [
+        TextDelta(text="Let me search for direct flights. "),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        TextDelta(text="There are no direct flights."),
+        StepCompleted(result=result),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_texts = [
+        cast(dict[str, Any], e.data)["message"]
+        for e in emitter.events
+        if e.kind == EventKind.MESSAGE
+    ]
+
+    assert message_texts == [
+        "Let me search for direct flights. ",
+        "There are no direct flights.",
+    ]

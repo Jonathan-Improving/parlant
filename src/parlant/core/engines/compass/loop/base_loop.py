@@ -56,6 +56,7 @@ from parlant.core.sessions import (
     EventKind,
     EventSource,
     MessageEventData,
+    Participant,
     StatusEventData,
     ToolCall,
     ToolEventData,
@@ -139,11 +140,19 @@ class _LoopState:
     message_handle: MessageEventHandle | None = None
     message_buffer: StringIO | None = None
     message_chunks: list[str | None] = field(default_factory=list)
+    # Chars of THIS step's message already emitted as their own (complete) bubbles
+    # via interrupt-splits (text -> tool -> text). The step-completion emit covers
+    # `result.message.text[emitted_message_len:]` — the authoritative remainder.
+    emitted_message_len: int = 0
 
     steps: list[StepResult] = field(default_factory=list)
 
 
 class _SemanticFailure(Exception):
+    pass
+
+
+class _GiveUp(Exception):
     pass
 
 
@@ -210,13 +219,22 @@ class BaseLoop(Loop):
         state = _LoopState(history=history, instructions_index=instructions_index)
 
         while not job.context.state.prepared_to_respond:
-            for _ in range(self._max_semantic_failures(job)):
+            max_semantic_failures = self._max_semantic_failures(job)
+            semantic_failure_count = 0
+
+            while semantic_failure_count < max_semantic_failures:
                 try:
                     await self._run_step(job, state)
                 except _SemanticFailure:
+                    semantic_failure_count += 1
+                    await self._reset_message_after_restart(job.context, state)
                     continue
                 else:
                     break
+
+            if semantic_failure_count == max_semantic_failures:
+                # TODO: we need to issue a message saying that we failed doing w/e...
+                raise _SemanticFailure()
 
             job.context.state.iterations.append(
                 IterationState(
@@ -259,11 +277,11 @@ class BaseLoop(Loop):
             case Effort.MIN:
                 return 1
             case Effort.LOW:
-                return 3
+                return 2
             case Effort.MEDIUM:
-                return 5
+                return 3
             case Effort.HIGH:
-                return 8
+                return 5
             case Effort.MAX:
                 return 10
 
@@ -288,8 +306,12 @@ class BaseLoop(Loop):
                 ):
                     produced = True
                     await self._update_reasoning(job.context, state, event)
-                    committed = await self._update_tool_calls(job.context, state, event)
+                    # Surface/close the message BEFORE the tool status: a text->tool
+                    # transition finalizes the preamble as its own bubble first, so the
+                    # tool status follows the message (no flicker), and post-tool text
+                    # starts a fresh message instead of gluing onto the preamble.
                     await self._update_message(job.context, state, event)
+                    committed = await self._update_tool_calls(job.context, state, event)
                     if not committed:
                         await self._commit_new_event(state, event)
 
@@ -429,21 +451,13 @@ class BaseLoop(Loop):
                 # are appended, preserving the provider-required assistant-tool order.
                 await self._commit_new_event(state, event)
 
-                if len(result.tool_calls) == 1:
-                    await context.session_event_emitter.emit_status_event(
-                        trace_id=context.tracer.trace_id,
-                        data=StatusEventData(
-                            status="processing",
-                            message=f"Running tool: {result.tool_calls[0].name}",
-                        ),
-                    )
-                else:
-                    await context.session_event_emitter.emit_status_event(
-                        trace_id=context.tracer.trace_id,
-                        data=StatusEventData(status="processing", message="Running tools"),
-                    )
+                await context.session_event_emitter.emit_status_event(
+                    trace_id=context.tracer.trace_id,
+                    data=StatusEventData(status="processing", message="Running tools"),
+                )
 
                 await self._run_tool_calls(context, state, result.tool_calls)
+
                 return True
             case _:
                 state.in_the_middle_of_running_tools = False
@@ -651,6 +665,27 @@ class BaseLoop(Loop):
 
         await self._hooks.call_on_message_generated(context, result.message.text)
 
+    async def _reset_message_after_restart(self, context: EngineContext, state: _LoopState) -> None:
+        """A reviewer-rejected step is being restarted. Finalize the message already
+        streamed during the rejected attempt as its own (complete) bubble, then reset
+        the streaming state so the retry begins a fresh message instead of appending to
+        it. A blocking loop doesn't stream a partial message (its handle is None here),
+        so this only clears the per-attempt flags there."""
+        if state.message_handle is not None:
+            await state.message_handle.update(
+                MessageEventData(
+                    message=state.message_buffer.getvalue() if state.message_buffer else "",
+                    participant=Participant(id=context.agent.id, display_name=context.agent.name),
+                    chunks=[*state.message_chunks, None],
+                )
+            )
+
+        state.message_handle = None
+        state.message_buffer = None
+        state.message_chunks = []
+        state.emitted_message_len = 0
+        state.in_the_middle_of_running_tools = False
+
     def _get_model_size(self, context: EngineContext, state: _LoopState) -> ModelSize:
         return ModelSize.MEDIUM
 
@@ -828,18 +863,39 @@ The following is notes and context about the current state of the conversation �
                 + "\n\n".join(reviewer_notes)
             )
 
-        if state.instructions_index is not None:
-            refreshed_instructions = self._instructions_message(
-                instructions,
-                job.context.session.id,
-            )
+        refreshed_instructions = self._instructions_message(
+            instructions,
+            job.context.session.id,
+        )
 
+        if state.instructions_index is not None:
             if state.history[state.instructions_index].text != refreshed_instructions.text:
                 self._logger.debug(
                     f"{self.__class__.__name__} updated turn instructions:\n{refreshed_instructions.text}"
                 )
 
                 state.history[state.instructions_index] = refreshed_instructions
+        elif instructions:
+            # No instructions message exists (e.g. a config with no per-turn
+            # step_instructions, like low-effort agents), but there's content to inject
+            # — notably the reviewer's adjusted reasoning / TODO on a retry. Insert one,
+            # positioned before the last customer message like _build_history, so it
+            # actually reaches the model. Without this the review loop would re-stream
+            # the same output and never converge.
+            index = next(
+                (
+                    i
+                    for i in range(len(state.history) - 1, -1, -1)
+                    if state.history[i].role == Role.USER
+                ),
+                len(state.history),
+            )
+            state.history.insert(index, refreshed_instructions)
+            state.instructions_index = index
+
+            self._logger.debug(
+                f"{self.__class__.__name__} inserted turn instructions:\n{refreshed_instructions.text}"
+            )
 
     def _build_tool_event_messages(
         self,

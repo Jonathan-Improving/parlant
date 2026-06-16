@@ -14,13 +14,15 @@
 
 from typing import Any, cast
 
+from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha.hooks import EngineHooks
+from parlant.core.engines.compass.loop.base_loop import _LoopState
 from parlant.core.engines.compass.loop.loop import LoopJob
 from parlant.core.engines.compass.loop.streaming_loop import StreamingLoop
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.loggers import StdoutLogger
-from parlant.core.nlp.react import Role
-from parlant.core.sessions import EventSource
+from parlant.core.nlp.react import Role, TextDelta, ToolCallStarted
+from parlant.core.sessions import EventKind, EventSource
 from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
@@ -78,3 +80,93 @@ async def test_that_turn_instructions_are_placed_before_the_last_customer_messag
     instruction_indices = [i for i, m in enumerate(history) if marker in m.text]
     assert instruction_indices == [len(history) - 2]
     assert instructions_index == len(history) - 2
+
+
+async def test_that_reviewer_adjusted_reasoning_is_injected_even_without_step_instructions() -> (
+    None
+):
+    # When step_instructions is None (e.g. low-effort agents) there is no turn-
+    # instructions message in history. The reviewer's adjusted reasoning (step_notes)
+    # must STILL reach the retried prompt — otherwise the retry re-streams the same
+    # output and the review loop never converges.
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState(step_notes="Do not call charge_card; ask for confirmation first.")
+
+    loop = _make_streaming_loop()
+    job = LoopJob(context=context, system_instructions="SYSTEM", step_instructions=None)
+
+    history, instructions_index = await loop._build_history(job)
+    assert instructions_index is None  # no step-instructions message exists for this config
+
+    state = _LoopState(history=history, instructions_index=instructions_index)
+    await loop._update_step_instructions(job, state)
+
+    # The adjusted reasoning must be present in the (to-be-re-streamed) history.
+    assert any("ask for confirmation first" in m.text for m in state.history)
+
+
+async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message() -> None:
+    # When a step is restarted (reviewer rejection), the already-streamed preamble must
+    # be finalized as its own message and the streaming state reset, so the retry begins
+    # a fresh message instead of concatenating onto the rejected one.
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState()
+
+    await loop._update_message(context, state, TextDelta(text="Let me check that for you."))
+    assert state.message_buffer is not None
+
+    await loop._reset_message_after_restart(context, state)
+    assert state.message_handle is None
+    assert state.message_buffer is None
+    assert state.message_chunks == []
+    assert state.in_the_middle_of_running_tools is False
+
+    # The retry's text starts a NEW message, not appended to the rejected preamble.
+    await loop._update_message(context, state, TextDelta(text="Actually, here's the answer."))
+    assert state.message_buffer is not None
+    assert state.message_buffer.getvalue() == "Actually, here's the answer."
+
+    # Two separate message events were emitted; the latest carries no preamble.
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_texts = [
+        cast(dict[str, Any], e.data)["message"]
+        for e in emitter.events
+        if e.kind == EventKind.MESSAGE
+    ]
+    assert "Let me check that for you." not in message_texts[-1]
+
+
+async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separate_messages() -> (
+    None
+):
+    # Within ONE step the model can emit text, call a tool, then emit more text
+    # (TEXT, TOOL, TEXT). The pre-tool and post-tool text must surface as TWO
+    # separate message events — not one glued bubble ("flights.There are" with no
+    # break), which is what happens when the open message isn't finalized at the
+    # text->tool transition (ToolCallStarted is currently a no-op for _update_message).
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState()
+
+    events = [
+        TextDelta(text="Let me search for direct flights. "),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        TextDelta(text="There are no direct flights."),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_texts = [
+        cast(dict[str, Any], e.data)["message"]
+        for e in emitter.events
+        if e.kind == EventKind.MESSAGE
+    ]
+
+    assert message_texts == [
+        "Let me search for direct flights. ",
+        "There are no direct flights.",
+    ]
