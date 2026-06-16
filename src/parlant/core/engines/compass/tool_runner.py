@@ -22,6 +22,7 @@ from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
 from parlant.core.tools import ToolContext, ToolId, ToolResult
+from parlant.core.tracer import Tracer
 
 # A tool call is given this long (seconds) to complete before it's abandoned and
 # reported as an error. Overridable via the PARLANT_TOOL_TIMEOUT env var.
@@ -33,11 +34,21 @@ class ToolRunner:
     captured into an error ToolResult rather than raised, so the loop can feed them
     back to the model like any other result."""
 
-    def __init__(self, logger: Logger, entity_queries: EntityQueries) -> None:
+    def __init__(self, logger: Logger, tracer: Tracer, entity_queries: EntityQueries) -> None:
         self._logger = logger
+        self._tracer = tracer
         self._entity_queries = entity_queries
 
     async def run_tool(
+        self,
+        context: EngineContext,
+        tool: ToolId,
+        arguments: Mapping[str, JSONSerializable],
+    ) -> ToolResult:
+        with self._tracer.span("tools.run"):
+            return await self._do_run_tool(context, tool, arguments)
+
+    async def _do_run_tool(
         self,
         context: EngineContext,
         tool: ToolId,

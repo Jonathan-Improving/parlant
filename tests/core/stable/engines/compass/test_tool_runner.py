@@ -57,8 +57,10 @@ def _engine_context() -> EngineContext:
 
 
 def _runner(service: _FakeService) -> ToolRunner:
+    tracer = LocalTracer()
     return ToolRunner(
-        StdoutLogger(LocalTracer()),
+        StdoutLogger(tracer),
+        tracer,
         cast(EntityQueries, _FakeEntityQueries(service)),
     )
 

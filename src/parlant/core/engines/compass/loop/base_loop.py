@@ -457,11 +457,11 @@ class BaseLoop(Loop):
     ) -> str | None:
         effort = context.state.dynamic_effort_level
 
-        if effort in (Effort.MIN, Effort.LOW):
+        if effort == Effort.MIN:
             # Skip the review for minimal-effort agents
             return None
 
-        if (effort == Effort.MEDIUM) and (
+        if (effort in (Effort.LOW, Effort.MEDIUM)) and (
             not context.state.has_matched_high_criticality_guidelines
         ):
             # For non-high-effort agents, skip the review

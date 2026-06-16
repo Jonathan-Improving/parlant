@@ -83,7 +83,7 @@ class Reviewer:
     ) -> ReviewResult:
         effort = context.state.dynamic_effort_level
 
-        with self._tracer.span("tool_calls.review"):
+        with self._tracer.span("tools.review"):
             if effort in (Effort.HIGH, Effort.MAX):
                 result, is_constructive = await self._review_tool_calls_with_high_effort_schema(
                     context,
@@ -178,6 +178,8 @@ class Reviewer:
         tool_calls: Sequence[ToolCallPart],
         effort: Effort,
     ) -> tuple[ReviewResult, bool]:
+        high_criticality = context.state.has_matched_high_criticality_guidelines
+
         inference = await self._low_effort_schematic_generator.generate(
             prompt=self._build_prompt(
                 context,
@@ -186,7 +188,7 @@ class Reviewer:
                 high_effort=False,
             ),
             hints={
-                "reasoning_effort": "low" if effort == Effort.MEDIUM else "minimal",
+                "reasoning_effort": "low" if high_criticality else "minimal",
                 "cache": {
                     "key": f"{self._cache_key(context)}.low",
                     "breakpoint": self._CACHE_BREAKPOINT,
