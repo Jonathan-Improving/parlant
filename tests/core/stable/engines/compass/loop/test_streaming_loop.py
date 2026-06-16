@@ -21,7 +21,18 @@ from parlant.core.engines.compass.loop.loop import LoopJob
 from parlant.core.engines.compass.loop.streaming_loop import StreamingLoop
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.loggers import StdoutLogger
-from parlant.core.nlp.react import Role, TextDelta, ToolCallStarted
+from parlant.core.nlp.react import (
+    FinishReason,
+    Message,
+    Role,
+    StepCompleted,
+    StepResult,
+    TextDelta,
+    TextPart,
+    ToolCallPart,
+    ToolCallStarted,
+    Usage,
+)
 from parlant.core.sessions import EventKind, EventSource
 from parlant.core.tracer import LocalTracer
 
@@ -105,6 +116,47 @@ async def test_that_reviewer_adjusted_reasoning_is_injected_even_without_step_in
     assert any("ask for confirmation first" in m.text for m in state.history)
 
 
+async def test_that_tool_preamble_note_is_only_injected_until_a_message_is_visible() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
+    context.state = ResponseState()
+
+    loop = _make_streaming_loop()
+    job = LoopJob(context=context, system_instructions="SYSTEM", step_instructions=None)
+
+    history, instructions_index = await loop._build_history(job)
+    state = _LoopState(history=history, instructions_index=instructions_index)
+
+    await loop._update_step_instructions(job, state)
+    assert any("Tool communication before tool use" in message.text for message in state.history)
+
+    state.user_visible_message_emitted = True
+    await loop._update_step_instructions(job, state)
+    assert not any(
+        "Tool communication before tool use" in message.text for message in state.history
+    )
+
+
+async def test_that_tool_preamble_note_is_injected_again_after_adjusted_reasoning() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
+    context.state = ResponseState(step_notes="Ask for the missing airport before searching.")
+
+    loop = _make_streaming_loop()
+    job = LoopJob(context=context, system_instructions="SYSTEM", step_instructions=None)
+
+    history, instructions_index = await loop._build_history(job)
+    state = _LoopState(
+        history=history,
+        instructions_index=instructions_index,
+        user_visible_message_emitted=True,
+    )
+
+    await loop._update_step_instructions(job, state)
+
+    instructions_text = "\n".join(message.text for message in state.history)
+    assert "Ask for the missing airport before searching." in instructions_text
+    assert "Tool communication before tool use" in instructions_text
+
+
 async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message() -> None:
     # When a step is restarted (reviewer rejection), the already-streamed preamble must
     # be finalized as its own message and the streaming state reset, so the retry begins
@@ -123,6 +175,8 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
     assert state.message_chunks == []
     assert state.in_the_middle_of_running_tools is False
 
+    context.state.step_notes = "Ask for confirmation instead of calling the tool."
+
     # The retry's text starts a NEW message, not appended to the rejected preamble.
     await loop._update_message(context, state, TextDelta(text="Actually, here's the answer."))
     assert state.message_buffer is not None
@@ -138,14 +192,11 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
     assert "Let me check that for you." not in message_texts[-1]
 
 
-async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separate_messages() -> (
-    None
-):
+async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_preamble() -> None:
     # Within ONE step the model can emit text, call a tool, then emit more text
-    # (TEXT, TOOL, TEXT). The pre-tool and post-tool text must surface as TWO
-    # separate message events — not one glued bubble ("flights.There are" with no
-    # break), which is what happens when the open message isn't finalized at the
-    # text->tool transition (ToolCallStarted is currently a no-op for _update_message).
+    # (TEXT, TOOL, TEXT). Once the pre-tool preamble is surfaced, further text in
+    # that same tool-call step should be suppressed so the user doesn't receive a
+    # chain of progress updates before tools actually run.
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
@@ -166,7 +217,37 @@ async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separat
         if e.kind == EventKind.MESSAGE
     ]
 
-    assert message_texts == [
-        "Let me search for direct flights. ",
-        "There are no direct flights.",
+    assert message_texts == ["Let me search for direct flights. "]
+
+
+async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_committed() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState(user_visible_message_emitted=True)
+
+    tool_call = ToolCallPart(id="call-1", name="search_flights")
+    result = StepResult(
+        message=Message(
+            role=Role.ASSISTANT,
+            parts=[TextPart(text="I'll check another airport."), tool_call],
+        ),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    events = [
+        TextDelta(text="I'll check another airport."),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        StepCompleted(result=result),
     ]
+    for event in events:
+        await loop._update_message(context, state, event)
+        await loop._commit_new_event(state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert message_events == []
+    assert state.history[-1].text == ""
+    assert state.history[-1].tool_calls == [tool_call]

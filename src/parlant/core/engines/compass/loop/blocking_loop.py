@@ -52,6 +52,11 @@ class BlockingLoop(BaseLoop):
                 # onto it.
                 buffered = state.message_buffer.getvalue()
 
+                if not self._can_emit_tool_preamble(context, state):
+                    state.suppress_current_tool_message_text = bool(buffered)
+                    state.message_buffer = None
+                    return
+
                 if buffered:
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
@@ -62,6 +67,7 @@ class BlockingLoop(BaseLoop):
                             ),
                         ),
                     )
+                    state.user_visible_message_emitted = True
                     state.emitted_message_len += len(buffered)
 
                 state.message_buffer = None
@@ -71,6 +77,12 @@ class BlockingLoop(BaseLoop):
                 # already emitted. Anchoring on `result.message.text` (not the buffer)
                 # keeps it correct even if a provider delivered text outside the deltas.
                 remaining = result.message.text[state.emitted_message_len :]
+
+                if result.needs_tools and not self._can_emit_tool_preamble(context, state):
+                    state.suppress_current_tool_message_text = bool(result.message.text)
+                    state.message_buffer = None
+                    state.emitted_message_len = 0
+                    return
 
                 if remaining:
                     await context.session_event_emitter.emit_message_event(
@@ -82,6 +94,7 @@ class BlockingLoop(BaseLoop):
                             ),
                         ),
                     )
+                    state.user_visible_message_emitted = True
 
                 state.message_buffer = None
                 state.emitted_message_len = 0

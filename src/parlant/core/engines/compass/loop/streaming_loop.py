@@ -34,6 +34,15 @@ class StreamingLoop(BaseLoop):
         match event:
             case TextDelta(text=text):
                 if state.message_handle is None:  # First message chunk
+                    if not self._can_emit_tool_preamble(context, state):
+                        if state.message_buffer is None:
+                            state.message_buffer = StringIO()
+                            state.message_chunks = []
+
+                        state.message_buffer.write(text)
+                        state.message_chunks.append(text)
+                        return
+
                     await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
                         data=StatusEventData(status="typing"),
@@ -53,6 +62,7 @@ class StreamingLoop(BaseLoop):
                             chunks=state.message_chunks,
                         ),
                     )
+                    state.user_visible_message_emitted = True
                 else:  # Subsequent message chunk
                     assert state.message_buffer is not None
 
@@ -88,6 +98,10 @@ class StreamingLoop(BaseLoop):
                 state.message_buffer = None
                 state.message_chunks = []
                 state.message_handle = None
+            case ToolCallStarted() if state.message_buffer is not None:
+                state.suppress_current_tool_message_text = bool(state.message_buffer.getvalue())
+                state.message_buffer = None
+                state.message_chunks = []
             case StepCompleted(result=result):
                 # Emit the authoritative remainder: everything this step's message holds
                 # beyond what interrupt-splits already emitted. Anchoring on
@@ -112,6 +126,11 @@ class StreamingLoop(BaseLoop):
                     state.emitted_message_len = 0
 
                     await self._complete_message_step(context, result)
+                elif result.needs_tools and not self._can_emit_tool_preamble(context, state):
+                    state.suppress_current_tool_message_text = bool(result.message.text)
+                    state.message_buffer = None
+                    state.message_chunks = []
+                    state.emitted_message_len = 0
                 elif remaining:
                     # Text arrived only in the final message (no deltas streamed) — emit
                     # it once as a complete, terminated message.
@@ -125,6 +144,7 @@ class StreamingLoop(BaseLoop):
                             chunks=[remaining, None],
                         ),
                     )
+                    state.user_visible_message_emitted = True
 
                     state.emitted_message_len = 0
 

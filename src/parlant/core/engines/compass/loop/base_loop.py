@@ -144,6 +144,11 @@ class _LoopState:
     # via interrupt-splits (text -> tool -> text). The step-completion emit covers
     # `result.message.text[emitted_message_len:]` â€” the authoritative remainder.
     emitted_message_len: int = 0
+    user_visible_message_emitted: bool = False
+    suppress_current_tool_message_text: bool = False
+
+    force_message_response: bool = False
+    force_message_note: str = ""
 
     steps: list[StepResult] = field(default_factory=list)
 
@@ -219,47 +224,48 @@ class BaseLoop(Loop):
         state = _LoopState(history=history, instructions_index=instructions_index)
 
         while not job.context.state.prepared_to_respond:
-            max_semantic_failures = self._max_semantic_failures(job)
-            semantic_failure_count = 0
+            try:
+                max_semantic_failures = self._max_semantic_failures(job)
+                semantic_failure_count = 0
 
-            while semantic_failure_count < max_semantic_failures:
-                try:
-                    await self._run_step(job, state)
-                except _SemanticFailure:
-                    semantic_failure_count += 1
-                    await self._reset_message_after_restart(job.context, state)
-                    continue
-                else:
-                    break
+                while semantic_failure_count < max_semantic_failures:
+                    try:
+                        await self._run_step(job, state)
+                    except _SemanticFailure:
+                        semantic_failure_count += 1
+                        await self._reset_message_after_restart(job.context, state)
+                        continue
+                    else:
+                        break
 
-            if semantic_failure_count == max_semantic_failures:
-                # TODO: we need to issue a message saying that we failed doing w/e...
-                raise _SemanticFailure()
+                if semantic_failure_count == max_semantic_failures:
+                    raise _GiveUp(
+                        "The agent repeatedly proposed tool calls that were rejected by "
+                        "policy review."
+                    )
 
-            job.context.state.iterations.append(
-                IterationState(
-                    matched_guidelines=[],
-                    ruled_out=[],
-                    resolved_guidelines=[],
-                    tool_insights=ToolInsights(evaluations={}, missing_data={}),
-                    executed_tools=[],
-                )
-            )
-
-            if len(job.context.state.iterations) >= 30:
-                self._logger.warning(
-                    f"Large number of engine iterations on session {job.context.session.id} ({job.context.session.title or 'Untitled'}):\n{state.steps}"
+                job.context.state.iterations.append(
+                    IterationState(
+                        matched_guidelines=[],
+                        ruled_out=[],
+                        resolved_guidelines=[],
+                        tool_insights=ToolInsights(evaluations={}, missing_data={}),
+                        executed_tools=[],
+                    )
                 )
 
-            if len(job.context.state.iterations) == job.context.agent.max_engine_iterations:
-                # TODO: We need to force a message here in some way...
-                # Maybe we can control max turns in the generator itself?
-                # Maybe we should just add to the prompt that we've failed to
-                # converge to a desired outcome and are now stopping.
-                self._logger.error(
-                    f"Maximum engine iterations reached on session {job.context.session.id} ({job.context.session.title or 'Untitled'}) without preparing a response; forcing completion. Reasoning: \n{json.dumps(job.context.state.reasoning_steps, indent=2)}"
-                )
-                job.context.state.prepared_to_respond = True
+                if len(job.context.state.iterations) >= 30:
+                    self._logger.warning(
+                        f"Large number of engine iterations on session {job.context.session.id} ({job.context.session.title or 'Untitled'}):\n{state.steps}"
+                    )
+
+                if len(job.context.state.iterations) == job.context.agent.max_engine_iterations:
+                    raise _GiveUp(
+                        "The agent reached the maximum number of engine iterations "
+                        "without preparing a response."
+                    )
+            except _GiveUp as exc:
+                await self._give_up(job, state, str(exc))
 
         await job.context.session_event_emitter.emit_status_event(
             trace_id=job.context.tracer.trace_id,
@@ -299,8 +305,10 @@ class BaseLoop(Loop):
             try:
                 async for event in self._react.stream_step(
                     history=state.history,
-                    tools=await self._get_tools(job.context),
-                    tool_choice="auto",
+                    tools=[]
+                    if state.force_message_response
+                    else await self._get_tools(job.context),
+                    tool_choice="none" if state.force_message_response else "auto",
                     reasoning=job.reasoning_config,
                     hints={"model_size": job.model_size},
                 ):
@@ -326,13 +334,70 @@ class BaseLoop(Loop):
                 )
                 await asyncio.sleep(wait)
 
+    async def _give_up(self, job: LoopJob, state: _LoopState, reason: str) -> None:
+        self._logger.error(
+            f"{reason} Forcing a final message on session {job.context.session.id} "
+            f"({job.context.session.title or 'Untitled'}). Reasoning: \n"
+            f"{json.dumps(job.context.state.reasoning_steps, indent=2)}"
+        )
+
+        await self._reset_message_after_restart(job.context, state)
+        self._drop_trailing_empty_assistant_messages(state)
+
+        state.force_message_response = True
+        state.force_message_note = (
+            "You've failed to address the current request after repeated attempts. "
+            "You must now explain to the user why you were not able to help currently. "
+            "Do not claim that the request was completed. Tool use is disabled for this "
+            "step, so you must send a concise message to the user now."
+        )
+
+        try:
+            await self._run_step(job, state)
+        except _SemanticFailure:
+            self._logger.error(
+                f"{self.__class__.__name__} could not force a final message because the "
+                "model still attempted tool use with tools disabled."
+            )
+        finally:
+            state.force_message_response = False
+            state.force_message_note = ""
+
+        job.context.state.prepared_to_respond = True
+
+    def _drop_trailing_empty_assistant_messages(self, state: _LoopState) -> None:
+        while state.history:
+            last_message = state.history[-1]
+            if (
+                last_message.role == Role.ASSISTANT
+                and not last_message.text
+                and not last_message.tool_calls
+            ):
+                state.history.pop()
+                continue
+
+            break
+
     async def _get_tools(self, context: EngineContext) -> list[ToolSpec]:
         return [*tool_specs_from_tools(context.state.available_tools)]
 
+    def _can_emit_tool_preamble(self, context: EngineContext, state: _LoopState) -> bool:
+        return not state.user_visible_message_emitted or bool(context.state.step_notes)
+
     async def _commit_new_event(self, state: _LoopState, event: StreamEvent) -> None:
         if isinstance(event, StepCompleted):
-            state.history.append(event.result.message)
+            message = event.result.message
+            if state.suppress_current_tool_message_text and event.result.needs_tools:
+                message = Message(
+                    role=message.role,
+                    parts=[part for part in message.parts if not isinstance(part, TextPart)],
+                    provider_data=message.provider_data,
+                    cache_key=message.cache_key,
+                )
+
+            state.history.append(message)
             state.steps.append(event.result)
+            state.suppress_current_tool_message_text = False
 
             if event.result.message.reasoning:
                 self._logger.trace(
@@ -856,6 +921,18 @@ The following is notes and context about the current state of the conversation â
             reviewer_notes.append(
                 "#### Suggested reasoning for the next step\n\n" + job.context.state.step_notes
             )
+
+        if not state.user_visible_message_emitted or job.context.state.step_notes:
+            reviewer_notes.append(
+                "#### Tool communication before tool use\n\n"
+                "If you need to use tools in this step, you should first send one short, "
+                "natural sentence to the user about what you are checking (Let me do X; Checking Y; Just a moment while I Z...). Keep it "
+                "specific to the current action, and avoid repeating wording from "
+                "earlier messages."
+            )
+
+        if state.force_message_note:
+            reviewer_notes.append("#### Required final response\n\n" + state.force_message_note)
 
         if reviewer_notes:
             instructions += (

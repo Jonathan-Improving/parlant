@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 from typing import Any, cast
 
+from parlant.core.agents import Effort
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.compass.loop.base_loop import _LoopState, _PROVIDER_DATA_KEY
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
+from parlant.core.engines.compass.loop.loop import LoopJob
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.loggers import StdoutLogger
 from parlant.core.nlp.react import (
@@ -37,7 +40,10 @@ from parlant.core.sessions import EventKind, EventSource, ToolEventData
 from parlant.core.tools import ToolId, ToolResult
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
+from tests.core.stable.engines.compass.guideline_matching.utils import (
+    create_agent,
+    create_engine_context,
+)
 
 
 def _make_blocking_loop() -> BlockingLoop:
@@ -74,6 +80,118 @@ class _NoopToolMessageReact:
 class _StubToolRunner:
     async def run_tool(self, context: Any, tool_id: ToolId, args: dict[str, Any]) -> ToolResult:
         return ToolResult(data={"ok": True})
+
+
+class _EmptyThenMessageReact:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def stream_step(
+        self,
+        *,
+        history: list[Message],
+        tools: list[Any],
+        tool_choice: str,
+        reasoning: Any,
+        hints: dict[str, Any],
+    ) -> Any:
+        self.calls.append(
+            {
+                "history": list(history),
+                "tools": list(tools),
+                "tool_choice": tool_choice,
+            }
+        )
+
+        if len(self.calls) == 1:
+            yield StepCompleted(
+                result=StepResult(
+                    message=Message(role=Role.ASSISTANT),
+                    finish_reason=FinishReason.STOP,
+                    usage=Usage(),
+                )
+            )
+        else:
+            yield StepCompleted(
+                result=StepResult(
+                    message=Message(
+                        role=Role.ASSISTANT,
+                        parts=[
+                            TextPart(
+                                text="I'm sorry, I'm not able to help with that right now."
+                            )
+                        ],
+                    ),
+                    finish_reason=FinishReason.STOP,
+                    usage=Usage(),
+                )
+            )
+
+
+class _RejectingReviewer:
+    async def review_tool_calls(
+        self,
+        context: Any,
+        reasoning: str,
+        tool_calls: list[ToolCallPart],
+    ) -> Any:
+        return type(
+            "ReviewResult",
+            (),
+            {
+                "todo": "",
+                "adjusted_reasoning": "Ask the user for the missing confirmation instead.",
+            },
+        )()
+
+
+class _RejectedToolsThenMessageReact:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def stream_step(
+        self,
+        *,
+        history: list[Message],
+        tools: list[Any],
+        tool_choice: str,
+        reasoning: Any,
+        hints: dict[str, Any],
+    ) -> Any:
+        self.calls.append(
+            {
+                "history": list(history),
+                "tools": list(tools),
+                "tool_choice": tool_choice,
+            }
+        )
+
+        if tool_choice == "none":
+            yield StepCompleted(
+                result=StepResult(
+                    message=Message(
+                        role=Role.ASSISTANT,
+                        parts=[
+                            TextPart(
+                                text="I'm sorry, I'm not able to help with that right now."
+                            )
+                        ],
+                    ),
+                    finish_reason=FinishReason.STOP,
+                    usage=Usage(),
+                )
+            )
+            return
+
+        tool_call = ToolCallPart(id="call-1", name="charge_card", args={})
+        yield ToolCallStarted(id=tool_call.id, name=tool_call.name)
+        yield StepCompleted(
+            result=StepResult(
+                message=Message(role=Role.ASSISTANT, parts=[tool_call]),
+                finish_reason=FinishReason.TOOL_CALLS,
+                usage=Usage(),
+            )
+        )
 
 
 def test_that_an_unreplayable_tool_event_is_rendered_as_a_result_not_dropped() -> None:
@@ -168,13 +286,67 @@ async def test_that_blocking_loop_emits_a_single_complete_message_event_without_
     assert context.state.prepared_to_respond is True
 
 
-async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separate_messages() -> (
-    None
-):
-    # TEXT, TOOL, TEXT within ONE step: the pre-tool and post-tool text must be TWO
-    # separate message events. Block mode emits result.message.text once, and
-    # TurnBuilder folds both segments into a single TextPart, so they arrive glued
-    # ("flights.There are") with no break between them.
+async def test_that_max_engine_iterations_forces_a_final_message_with_tools_disabled() -> None:
+    agent = replace(create_agent(), max_engine_iterations=1)
+    context = create_engine_context(
+        conversation=[(EventSource.CUSTOMER, "please help")],
+        agent=agent,
+    )
+    context.state = ResponseState()
+
+    react = _EmptyThenMessageReact()
+    loop = _make_blocking_loop()
+    loop._react = cast(Any, react)
+
+    await loop.run(LoopJob(context=context, system_instructions="SYSTEM"))
+
+    assert len(react.calls) == 2
+    assert react.calls[0]["tool_choice"] == "auto"
+    assert react.calls[1]["tool_choice"] == "none"
+    assert react.calls[1]["tools"] == []
+    assert any(
+        "You must now explain to the user" in message.text
+        for message in react.calls[1]["history"]
+    )
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+    assert cast(dict[str, Any], message_events[-1].data)["message"] == (
+        "I'm sorry, I'm not able to help with that right now."
+    )
+
+
+async def test_that_max_semantic_failures_force_a_final_message_with_tools_disabled() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "please charge it")])
+    context.state = ResponseState(agent_effort=Effort.HIGH)
+
+    react = _RejectedToolsThenMessageReact()
+    loop = _make_blocking_loop()
+    loop._react = cast(Any, react)
+    loop._reviewer = cast(Any, _RejectingReviewer())
+
+    await loop.run(LoopJob(context=context, system_instructions="SYSTEM"))
+
+    assert len(react.calls) == 6
+    assert [call["tool_choice"] for call in react.calls[:-1]] == ["auto"] * 5
+    assert react.calls[-1]["tool_choice"] == "none"
+    assert react.calls[-1]["tools"] == []
+    assert any(
+        "Tool use is disabled for this step" in message.text
+        for message in react.calls[-1]["history"]
+    )
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+    assert cast(dict[str, Any], message_events[-1].data)["message"] == (
+        "I'm sorry, I'm not able to help with that right now."
+    )
+
+
+async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_preamble() -> None:
+    # TEXT, TOOL, TEXT within ONE step: once the pre-tool preamble is surfaced,
+    # further text in that same tool-call step should be suppressed so the user
+    # doesn't receive a chain of progress updates before tools actually run.
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
 
@@ -211,7 +383,38 @@ async def test_that_text_before_and_after_a_tool_call_in_one_step_become_separat
         if e.kind == EventKind.MESSAGE
     ]
 
-    assert message_texts == [
-        "Let me search for direct flights. ",
-        "There are no direct flights.",
+    assert message_texts == ["Let me search for direct flights. "]
+
+
+async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_committed() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+
+    loop = _make_blocking_loop()
+    state = _LoopState(user_visible_message_emitted=True)
+
+    tool_call = ToolCallPart(id="call-1", name="search_flights")
+    result = StepResult(
+        message=Message(
+            role=Role.ASSISTANT,
+            parts=[TextPart(text="I'll check another airport."), tool_call],
+        ),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    events = [
+        TextDelta(text="I'll check another airport."),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        StepCompleted(result=result),
     ]
+    for event in events:
+        await loop._update_message(context, state, event)
+        await loop._commit_new_event(state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert message_events == []
+    assert state.history[-1].text == ""
+    assert state.history[-1].tool_calls == [tool_call]
