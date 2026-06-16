@@ -17,18 +17,16 @@ from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from io import StringIO
-from itertools import chain
 import json
 from typing import Any, Optional, cast
 
 from parlant.core.agents import Effort
 from parlant.core.async_utils import safe_gather
-from parlant.core.common import Criticality, JSONSerializable
+from parlant.core.common import JSONSerializable
 from parlant.core.emissions import MessageEventHandle, StatusEventHandle
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.alpha.tool_calling.tool_caller import ToolInsights
-from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext, IterationState
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob, LoopResult
 from parlant.core.engines.compass.tool_runner import ToolRunner
@@ -257,7 +255,7 @@ class BaseLoop(Loop):
     def _max_semantic_failures(self, job: LoopJob) -> int:
         """The number of times a step can be restarted due to a reviewer-provided
         policy-adjusted reasoning before we give up and propagate the failure."""
-        match get_dynamic_effort_level(job.context):
+        match job.context.state.dynamic_effort_level:
             case Effort.MIN:
                 return 1
             case Effort.LOW:
@@ -457,14 +455,14 @@ class BaseLoop(Loop):
         reasoning: str,
         tool_calls: Sequence[ToolCallPart],
     ) -> str | None:
-        effort = get_dynamic_effort_level(context)
+        effort = context.state.dynamic_effort_level
 
         if effort in (Effort.MIN, Effort.LOW):
             # Skip the review for minimal-effort agents
             return None
 
         if (effort == Effort.MEDIUM) and (
-            not self._has_matched_high_criticality_guidelines(context)
+            not context.state.has_matched_high_criticality_guidelines
         ):
             # For non-high-effort agents, skip the review
             # if no high-criticality guidelines were matched
@@ -488,15 +486,6 @@ class BaseLoop(Loop):
             return adjusted_reasoning
 
         return None
-
-    def _has_matched_high_criticality_guidelines(self, context: EngineContext) -> bool:
-        return any(
-            match.guideline.criticality == Criticality.HIGH
-            for match in chain(
-                context.state.ordinary_guideline_matches,
-                context.state.tool_enabled_guideline_matches.keys(),
-            )
-        )
 
     async def _run_tool_calls(
         self,

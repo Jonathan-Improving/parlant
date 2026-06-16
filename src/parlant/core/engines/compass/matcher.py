@@ -25,7 +25,6 @@ from parlant.core.async_utils import safe_gather
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.guideline_matcher_registry import GuidelineMatcherRegistry
-from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.guideline_matching.guideline_function_matcher import (
     GuidelineFunctionMatcher,
 )
@@ -157,7 +156,7 @@ class Matcher:
 
         strategy = MatcherStrategy.RECALL
 
-        match get_dynamic_effort_level(context):
+        match context.state.dynamic_effort_level:
             case Effort.MIN:
                 match guideline.criticality:
                     case Criticality.LOW:
@@ -423,6 +422,8 @@ class Matcher:
             context.state.ordinary_guideline_matches = list(
                 set(matches).difference(set(tool_enabled.keys()))
             )
+
+        context.state.invalidate_cached_properties()
 
     async def _find_tool_enabled_guideline_matches(
         self,

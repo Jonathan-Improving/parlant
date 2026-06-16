@@ -18,7 +18,6 @@ from itertools import chain
 from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
@@ -63,7 +62,7 @@ class Responder:
         context: EngineContext,
         refresh_state: Callable[[EngineContext], Awaitable[None]] | None,
     ) -> Callable[[EngineContext], Awaitable[str]] | None:
-        effort = get_dynamic_effort_level(context)
+        effort = context.state.dynamic_effort_level
 
         if effort in (Effort.MIN, Effort.LOW):
             return None  # No per-turn instructions for low effort agents
@@ -73,7 +72,7 @@ class Responder:
         async def build_step_instructions_once(ctx: EngineContext) -> str:
             nonlocal cached_instructions
 
-            current_effort = get_dynamic_effort_level(ctx)
+            current_effort = ctx.state.dynamic_effort_level
 
             if current_effort not in (Effort.HIGH, Effort.MAX):
                 # For medium effort agents, cache the instructions after the first build,
@@ -304,7 +303,7 @@ Finally, remember that this is a LIVE CONVERSATION, not email. Be simple, concis
         return builder.build()
 
     def _get_model_size(self, context: EngineContext) -> ModelSize:
-        match get_dynamic_effort_level(context):
+        match context.state.dynamic_effort_level:
             case Effort.MIN:
                 return ModelSize.SMALL
             case Effort.LOW:
@@ -319,7 +318,7 @@ Finally, remember that this is a LIVE CONVERSATION, not email. Be simple, concis
                 return None
 
     def _get_reasoning_config(self, context: EngineContext) -> ReasoningConfig | None:
-        match get_dynamic_effort_level(context):
+        match context.state.dynamic_effort_level:
             case Effort.MIN:
                 return ReasoningConfig(effort="minimal", visibility="none")
             case Effort.LOW:

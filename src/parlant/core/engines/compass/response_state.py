@@ -13,8 +13,11 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from functools import cached_property
+from itertools import chain
 from typing import Any, Optional, TypeAlias
 
+from parlant.core.agents import Effort
 from parlant.core.capabilities import Capability
 from parlant.core.context_variables import ContextVariable, ContextVariableValue
 from parlant.core.emissions import EmittedEvent
@@ -24,7 +27,17 @@ from parlant.core.engines.engine_context import EngineContext as _EngineContext
 from parlant.core.glossary import Term
 from parlant.core.guidelines import Guideline, GuidelineId
 from parlant.core.journeys import Journey, JourneyId
+from parlant.core.common import Criticality
 from parlant.core.tools import Tool, ToolId
+
+
+_EFFORT_ORDER: dict[Effort, int] = {
+    Effort.MIN: 0,
+    Effort.LOW: 1,
+    Effort.MEDIUM: 2,
+    Effort.HIGH: 3,
+    Effort.MAX: 4,
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +53,7 @@ class IterationState:
 
 @dataclass
 class ResponseState:
+    agent_effort: Effort = Effort.MEDIUM
     ordinary_guideline_matches: list[GuidelineMatch] = field(default_factory=list)
     tool_enabled_guideline_matches: dict[GuidelineMatch, list[ToolId]] = field(default_factory=dict)
     # tools the matched guidelines enabled this turn (described in the prompt)
@@ -103,6 +117,37 @@ class ResponseState:
     @property
     def guidelines(self) -> list[Guideline]:
         return self.ordinary_guidelines + self.tool_enabled_guidelines
+
+    @cached_property
+    def dynamic_effort_level(self) -> Effort:
+        """Resolve effective effort from the agent default and matched guideline effort levels."""
+        efforts = [
+            self.agent_effort,
+            *(
+                match.guideline.effort
+                for match in chain(
+                    self.ordinary_guideline_matches,
+                    self.tool_enabled_guideline_matches.keys(),
+                )
+                if match.guideline.effort is not None
+            ),
+        ]
+
+        return max(efforts, key=lambda effort: _EFFORT_ORDER[effort])
+
+    @cached_property
+    def has_matched_high_criticality_guidelines(self) -> bool:
+        return any(
+            match.guideline.criticality == Criticality.HIGH
+            for match in chain(
+                self.ordinary_guideline_matches,
+                self.tool_enabled_guideline_matches.keys(),
+            )
+        )
+
+    def invalidate_cached_properties(self) -> None:
+        self.__dict__.pop("dynamic_effort_level", None)
+        self.__dict__.pop("has_matched_high_criticality_guidelines", None)
 
 
 # The compass engine sees its own ResponseState typed through context.state.

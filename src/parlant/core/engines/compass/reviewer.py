@@ -22,7 +22,6 @@ from parlant.core.agents import Effort
 from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.prompt_builder import EventAdaptationFormat, PromptBuilder
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
-from parlant.core.engines.compass.common import get_dynamic_effort_level
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.loggers import Logger
 from parlant.core.nlp.generation import SchematicGenerator
@@ -82,7 +81,7 @@ class Reviewer:
         reasoning: str,
         tool_calls: Sequence[ToolCallPart],
     ) -> ReviewResult:
-        effort = get_dynamic_effort_level(context)
+        effort = context.state.dynamic_effort_level
 
         with self._tracer.span("tool_calls.review"):
             if effort in (Effort.HIGH, Effort.MAX):

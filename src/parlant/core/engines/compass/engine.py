@@ -170,7 +170,7 @@ class CompassEngine(Engine):
             session_event_emitter=event_emitter,
             response_event_emitter=EventBuffer(agent),
             interaction=interaction,
-            state=ResponseState(),
+            state=ResponseState(agent_effort=agent.effort),
         )
 
         # Set in context for access by hooks and other components

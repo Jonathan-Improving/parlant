@@ -182,6 +182,7 @@ async def base_test_that_guidelines_are_ranked_correctly(
 
     context = create_engine_context(conversation=conversation, agent=agent)
     context.state = ResponseState(
+        agent_effort=context.agent.effort,
         context_variables=list(context_variables),
         glossary_terms=set(terms),
         capabilities=list(capabilities),
