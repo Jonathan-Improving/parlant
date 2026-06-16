@@ -480,10 +480,12 @@ class BaseLoop(Loop):
             reasoning,
             tool_calls,
         )
-        context.state.todo = review_result.remaining_tasks.strip()
 
-        if review_result.breaches:
-            return review_result.adjusted_reasoning
+        if todo := review_result.todo:
+            context.state.todo = todo
+
+        if adjusted_reasoning := review_result.adjusted_reasoning:
+            return adjusted_reasoning
 
         return None
 

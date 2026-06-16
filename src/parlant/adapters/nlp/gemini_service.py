@@ -41,7 +41,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_distiller import 
     GuidelineDistillSchema,
 )
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
-from parlant.core.engines.compass.reviewer import ReviewSchema
+from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
 from parlant.core.meter import Meter
 from parlant.core.nlp.policies import policy, retry
 from parlant.core.nlp.tokenization import EstimatingTokenizer
@@ -1711,7 +1711,12 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
 
-        if t is ReviewSchema:
+        if t is LowEffortReview:
+            return Gemini_3_1_Flash_Lite[t](  # type: ignore
+                self.logger, self._tracer, self._meter, self._health_reporter
+            )
+
+        if t is HighEffortReview:
             return Gemini_3_5_Flash[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
