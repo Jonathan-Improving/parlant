@@ -25,7 +25,6 @@ from parlant.core.engines.engine_context import Interaction
 from parlant.core.engines.compass.matcher import Matcher
 from parlant.core.engines.compass.responder import Responder
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
-from parlant.core.engines.compass.task_runner import TaskRunner
 from parlant.core.engines.types import Context, Engine, UtteranceRequest
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
@@ -42,7 +41,6 @@ class CompassEngine(Engine):
         meter: Meter,
         matcher: Matcher,
         responder: Responder,
-        task_runner: TaskRunner,
         entity_queries: EntityQueries,
         hooks: EngineHooks,
     ) -> None:
@@ -52,7 +50,6 @@ class CompassEngine(Engine):
 
         self._matcher = matcher
         self._responder = responder
-        self._task_runner = task_runner
 
         self._entity_queries = entity_queries
         self._hooks = hooks
