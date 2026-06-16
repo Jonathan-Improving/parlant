@@ -39,7 +39,7 @@ from google.genai.errors import ClientError
 
 from parlant.adapters.nlp.gemini_service import (
     GEMINI_THOUGHT_SIGNATURE_KEY,
-    TURN_INSTRUCTIONS_TOOL_NAME,
+    SYSTEM_UPDATE_TOOL_NAME,
     Gemini_3_1_Flash_Lite,
     GeminiReactGenerator,
 )
@@ -251,7 +251,7 @@ def test_that_a_mid_conversation_system_message_becomes_a_synthetic_tool_result(
     # Gemini contents have no system role, and folding a mid-conversation system
     # message into system_instruction would break caching. Appending it to the user
     # message makes the model echo it, so instead it's delivered as the result of a
-    # synthetic get_instructions_for_next_turn tool — fetched data, not user input.
+    # synthetic system_update tool — fetched data, not user input.
     history = [
         Message(role=Role.SYSTEM, parts=[TextPart(text="main")]),
         Message(role=Role.USER, parts=[TextPart(text="hi")]),
@@ -262,7 +262,7 @@ def test_that_a_mid_conversation_system_message_becomes_a_synthetic_tool_result(
 
     # system_instruction holds the leading system + protocol note, not "mid".
     assert request["system_instruction"].startswith("main")
-    assert "ADDITIONAL RESPONSE CONSIDERATIONS" in request["system_instruction"]
+    assert "OCCASIONAL SYSTEM UPDATES" in request["system_instruction"]
     assert "mid" not in request["system_instruction"]
 
     # The instruction rides as a trailing function-response turn (no functionCall:
@@ -271,8 +271,8 @@ def test_that_a_mid_conversation_system_message_becomes_a_synthetic_tool_result(
     assert [c.role for c in contents] == ["user", "user"]
     assert all(p.function_call is None for c in contents for p in (c.parts or []))
     function_response = contents[-1].parts[-1].function_response
-    assert function_response.name == TURN_INSTRUCTIONS_TOOL_NAME
-    assert function_response.response == {"instructions": "mid"}
+    assert function_response.name == SYSTEM_UPDATE_TOOL_NAME
+    assert function_response.response == {"content": "mid"}
 
 
 def test_that_encode_maps_effort_to_a_thinking_budget_on_gemini_25(logger: Logger) -> None:
