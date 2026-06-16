@@ -56,6 +56,7 @@ from parlant.core.agents import AgentId
 from parlant.core.loggers import Logger
 from parlant.core.nlp.embedding import EmbedderFactory, EmbeddingCacheProvider, Embedder
 from parlant.core.tools import (
+    Narration,
     Tool,
     ToolError,
     ToolParameterDescriptor,
@@ -125,6 +126,11 @@ ToolFunction = Union[
 class ToolEntry:
     tool: Tool
     function: ToolFunction
+    narration: Narration | None = None
+    """The tool's authored narration, kept server-side (like ``function``). The callable
+    form lives only here; it's resolved to a string in ``resolve_tool`` and never put on
+    the ``Tool`` dataclass or sent over the wire. The static form is also copied onto
+    ``tool.narration``."""
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.function(*args, **kwargs)
@@ -142,6 +148,11 @@ class _ToolDecoratorParams(TypedDict, total=False):
 
     overlap: ToolOverlap
     """Defines how the tool overlaps with other tools. Defaults to ToolOverlap.AUTO."""
+
+    narration: Narration
+    """Message(s) to show in the agent's "thinking" status while the tool runs, instead of
+    the generic default. A string, several alternatives (one picked at random per call), or
+    a function of the ToolContext (resolved to a string server-side per call)."""
 
 
 _ToolParameterType = Union[str, int, float, bool, date, datetime, list[Any], None]
@@ -257,11 +268,15 @@ async def adapt_tool_arguments(
 
 
 async def _recompute_and_marshal_tool(
-    tool: Tool, plugin_data: Mapping[str, Any], context: ToolContext
+    tool: Tool,
+    plugin_data: Mapping[str, Any],
+    context: ToolContext,
+    narration: Narration | None = None,
 ) -> Tool:
     """This function is specifically used to refresh some of the tool's
     details based on dynamic changes (e.g., updating parameter descriptors
-    based on dynamically-generated enum choices)"""
+    based on dynamically-generated enum choices, or resolving a function-form
+    narration to a string)"""
     new_parameters = {}
 
     for name, (old_descriptor, options) in tool.parameters.items():
@@ -295,6 +310,26 @@ async def _recompute_and_marshal_tool(
 
         new_parameters[name] = (new_descriptor, marshalled_options)
 
+    # Resolve a function-form narration to a string (mirrors the choice_provider arg
+    # binding above): ToolContext is matched by type, other params by name from plugin_data.
+    # The static form passes through. Only the resolved string lands on the Tool / the wire.
+    resolved_narration: str | Sequence[str] | None
+    if callable(narration):
+        narration_args: dict[str, Any] = {}
+        for param_name, param in inspect.signature(narration).parameters.items():
+            # ToolContext is bound by type OR by the conventional name (so a bare
+            # ``lambda context: ...`` works); other params come from plugin_data by name.
+            if param.annotation is ToolContext or param_name in ("context", "ctx", "c"):
+                narration_args[param_name] = context
+            elif param_name in plugin_data:
+                narration_args[param_name] = plugin_data[param_name]
+        narration_result = narration(**narration_args)
+        resolved_narration = (
+            await narration_result if inspect.isawaitable(narration_result) else narration_result
+        )
+    else:
+        resolved_narration = narration
+
     return Tool(
         name=tool.name,
         creation_utc=datetime.now(timezone.utc),
@@ -304,6 +339,7 @@ async def _recompute_and_marshal_tool(
         required=tool.required,
         consequential=tool.consequential,
         overlap=tool.overlap,
+        narration=resolved_narration,
     )
 
 
@@ -428,6 +464,8 @@ def _tool_decorator_impl(
     def decorator(func: ToolFunction) -> ToolEntry:
         _ensure_valid_tool_signature(func)
 
+        narration = kwargs.get("narration")
+
         entry = ToolEntry(
             tool=Tool(
                 creation_utc=datetime.now(timezone.utc),
@@ -438,8 +476,12 @@ def _tool_decorator_impl(
                 required=_find_required_params(func),
                 consequential=kwargs.get("consequential", False),
                 overlap=kwargs.get("overlap", ToolOverlap.AUTO),
+                # The static form is visible without resolution; a callable is left off
+                # the dataclass and resolved per-call in resolve_tool (it stays on the entry).
+                narration=narration if not callable(narration) else None,
             ),
             function=func,
+            narration=narration,
         )
 
         return entry
@@ -725,6 +767,7 @@ class PluginServer:
                 spec.tool,
                 self.plugin_data,
                 ToolContext(context.agent_id, context.session_id, context.customer_id),
+                spec.narration,
             )
 
             return ReadToolResponse(tool=tool)
@@ -918,6 +961,7 @@ class PluginClient(ToolService):
             required=t["required"],
             consequential=t["consequential"],
             overlap=ToolOverlap(t["overlap"]),
+            narration=t.get("narration"),  # .get: tolerate older servers without the field
         )
 
     @override
@@ -986,6 +1030,7 @@ class PluginClient(ToolService):
             required=t["required"],
             consequential=t["consequential"],
             overlap=ToolOverlap(t["overlap"]),
+            narration=t.get("narration"),  # .get: tolerate older servers without the field
         )
 
     @override

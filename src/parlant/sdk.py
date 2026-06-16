@@ -267,6 +267,8 @@ from parlant.core.tags import Tag as _Tag, TagDocumentStore, TagId, TagStore
 from parlant.core.tools import (
     ControlOptions,
     Lifespan,
+    Narration,
+    NarrationFn,
     SessionMode,
     SessionStatus,
     Tool,
@@ -5815,6 +5817,8 @@ __all__ = [
     "TagId",
     "Term",
     "TermId",
+    "Narration",
+    "NarrationFn",
     "Tool",
     "ToolContext",
     "ToolContextAccessor",

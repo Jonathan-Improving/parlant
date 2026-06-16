@@ -21,7 +21,8 @@ from parlant.core.common import JSONSerializable
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
-from parlant.core.tools import ToolContext, ToolId, ToolResult
+from parlant.core.sessions import StatusEventData
+from parlant.core.tools import ToolContext, ToolId, ToolResult, ToolService, pick_narration
 from parlant.core.tracer import Tracer
 
 # A tool call is given this long (seconds) to complete before it's abandoned and
@@ -69,6 +70,8 @@ class ToolRunner:
 
             service = await self._entity_queries.read_tool_service(tool.service_name)
 
+            await self._emit_narration(context, service, tool, tool_context)
+
             result = await asyncio.wait_for(
                 service.call_tool(tool.tool_name, tool_context, arguments),
                 timeout=timeout,
@@ -88,6 +91,32 @@ class ToolRunner:
         except Exception as e:
             self._logger.error(f"Tool call failed ({tool.to_string()}): {e}")
             return ToolResult(data="Tool call error", metadata={"error_details": str(e)})
+
+    async def _emit_narration(
+        self,
+        context: EngineContext,
+        service: ToolService,
+        tool: ToolId,
+        tool_context: ToolContext,
+    ) -> None:
+        """Show the tool's narration in the agent's "thinking" status before it runs.
+
+        We resolve the tool (so a function-form narration is computed with the live
+        ToolContext) and only emit when narration is present — otherwise the loop's
+        generic "Running tool: X" status stands. Best-effort: a narration failure must
+        never prevent the tool from running."""
+        try:
+            resolved = await service.resolve_tool(tool.tool_name, tool_context)
+
+            message = pick_narration(resolved.narration)
+
+            if message:
+                await context.session_event_emitter.emit_status_event(
+                    trace_id=context.tracer.trace_id,
+                    data=StatusEventData(status="processing", message=message),
+                )
+        except Exception as e:
+            self._logger.warning(f"Failed to resolve/emit narration for {tool.to_string()}: {e}")
 
     def _resolve_timeout(self) -> float:
         """Per-call tool timeout in seconds, from PARLANT_TOOL_TIMEOUT, falling back

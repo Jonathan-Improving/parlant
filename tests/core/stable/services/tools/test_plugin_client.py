@@ -30,6 +30,7 @@ from parlant.core.tools import (
     ToolResult,
     ToolResultError,
     ToolOverlap,
+    pick_narration,
 )
 from parlant.core.nlp.embedding import EmbedderFactory, EmbeddingResult, NullEmbedder
 from parlant.core.services.tools.plugins import PluginServer, tool
@@ -37,7 +38,7 @@ from parlant.core.agents import Agent, AgentId, AgentStore
 from parlant.core.tracer import LocalTracer
 from parlant.core.emission.event_buffer import EventBuffer, EventBufferFactory
 from parlant.core.emissions import EventEmitter, EventEmitterFactory
-from parlant.core.services.tools.plugins import PluginClient
+from parlant.core.services.tools.plugins import PluginClient, _recompute_and_marshal_tool
 from parlant.core.sessions import SessionId, EventKind
 from parlant.core.tools import ToolExecutionError
 from tests.test_utilities import run_service_server
@@ -138,6 +139,140 @@ async def test_that_a_plugin_with_one_configured_tool_returns_that_tool(
             listed_tools = await client.list_tools()
             assert len(listed_tools) == 1
             assert my_tool.tool == listed_tools[0]
+
+
+def test_that_pick_narration_picks_a_message_or_none() -> None:
+    assert pick_narration("Looking that up…") == "Looking that up…"
+    assert pick_narration(["only one"]) == "only one"
+    options = ["a", "b", "c"]
+    assert pick_narration(options) in options
+    assert pick_narration(None) is None
+    assert pick_narration("") is None
+    assert pick_narration([]) is None
+
+
+# Container-free tests of the narration mechanics (the round-trip tests below exercise the
+# same thing end-to-end over HTTP, but require the DI container fixture).
+
+
+def test_that_static_narration_is_on_the_tool_and_a_callable_is_kept_off() -> None:
+    @tool(narration="Looking that up…")
+    def static_tool(context: ToolContext) -> ToolResult:
+        """desc"""
+        return ToolResult({})
+
+    assert static_tool.tool.narration == "Looking that up…"  # visible without resolution
+    assert static_tool.narration == "Looking that up…"  # also stashed on the entry
+
+    def narrate(context: ToolContext) -> str:
+        return "dynamic"
+
+    @tool(narration=narrate)
+    def dynamic_tool(context: ToolContext) -> ToolResult:
+        """desc"""
+        return ToolResult({})
+
+    assert dynamic_tool.tool.narration is None  # callable never on the serializable dataclass
+    assert dynamic_tool.narration is narrate  # only on the entry
+
+
+async def test_that_recompute_resolves_a_callable_narration_with_the_tool_context() -> None:
+    @tool(narration=lambda context: f"Helping {context.customer_id}…")
+    def my_tool(context: ToolContext) -> ToolResult:
+        """desc"""
+        return ToolResult({})
+
+    ctx = ToolContext(agent_id="a", session_id="s", customer_id="bob")
+    resolved = await _recompute_and_marshal_tool(my_tool.tool, {}, ctx, my_tool.narration)
+    assert resolved.narration == "Helping bob…"
+
+
+async def test_that_recompute_passes_static_narration_through() -> None:
+    @tool(narration=["one", "two"])
+    def my_tool(context: ToolContext) -> ToolResult:
+        """desc"""
+        return ToolResult({})
+
+    ctx = ToolContext(agent_id="a", session_id="s", customer_id="c")
+    resolved = await _recompute_and_marshal_tool(my_tool.tool, {}, ctx, my_tool.narration)
+    assert list(resolved.narration or []) == ["one", "two"]
+
+
+def test_that_the_plugin_client_reconstructs_narration_from_json() -> None:
+    tracer = LocalTracer()
+    client = PluginClient(
+        url="http://localhost",
+        event_emitter_factory=cast(Any, None),
+        logger=StdoutLogger(tracer),
+        tracer=tracer,
+    )
+    base: dict[str, Any] = {
+        "name": "t",
+        "creation_utc": datetime.now().isoformat(),
+        "description": "",
+        "metadata": {},
+        "parameters": {},
+        "required": [],
+        "consequential": False,
+        "overlap": ToolOverlap.AUTO.value,
+    }
+    assert client._tool_from_json({**base, "narration": "hi"}).narration == "hi"
+    assert client._tool_from_json({**base, "narration": ["a", "b"]}).narration == ["a", "b"]
+    assert client._tool_from_json(base).narration is None  # older server omits the field
+
+
+async def test_that_a_plugin_round_trips_static_narration(
+    container: Container, tool_context: ToolContext
+) -> None:
+    @tool(narration="Looking that up…")
+    def my_tool(context: ToolContext) -> ToolResult:
+        """My tool's description"""
+        return ToolResult({})
+
+    # The static form is visible on the dataclass without resolution (in-process use).
+    assert my_tool.tool.narration == "Looking that up…"
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            assert (await client.read_tool(my_tool.tool.name)).narration == "Looking that up…"
+            resolved = await client.resolve_tool(my_tool.tool.name, tool_context)
+            assert resolved.narration == "Looking that up…"
+
+
+async def test_that_a_plugin_round_trips_sequence_narration(
+    container: Container, tool_context: ToolContext
+) -> None:
+    options = ["Checking the catalog…", "One moment…"]
+
+    @tool(narration=options)
+    def my_tool(context: ToolContext) -> ToolResult:
+        """My tool's description"""
+        return ToolResult({})
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            resolved = await client.resolve_tool(my_tool.tool.name, tool_context)
+            assert list(resolved.narration or []) == options
+
+
+async def test_that_a_callable_narration_is_resolved_server_side_with_the_tool_context(
+    container: Container, tool_context: ToolContext
+) -> None:
+    @tool(narration=lambda context: f"Helping {context.customer_id}…")
+    def my_tool(context: ToolContext) -> ToolResult:
+        """My tool's description"""
+        return ToolResult({})
+
+    # The callable lives only on the ToolEntry, never on the (serializable) dataclass.
+    assert my_tool.tool.narration is None
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            # read_tool doesn't resolve callables, so narration is absent there...
+            assert (await client.read_tool(my_tool.tool.name)).narration is None
+            # ...but resolve_tool runs the callable server-side with the ToolContext.
+            resolved = await client.resolve_tool(my_tool.tool.name, tool_context)
+            assert resolved.narration == f"Helping {tool_context.customer_id}…"
 
 
 async def test_that_a_plugin_reads_a_tool(container: Container) -> None:

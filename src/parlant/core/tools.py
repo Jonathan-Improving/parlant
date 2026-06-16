@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from enum import Enum, auto
 import importlib
 import inspect
+import random
 import sys
 from types import UnionType
 from typing import (
@@ -249,6 +250,19 @@ class ToolOverlap(Enum):
     """The tool always overlaps with other tools in context."""
 
 
+NarrationFn: TypeAlias = Callable[..., str | Awaitable[str]]
+"""A tool's narration as a function (resolved server-side, sync or async). Like a
+parameter's ``choice_provider``, it's bound by name: declare a ``context: ToolContext``
+param to receive the ToolContext (agent/session/customer), and/or params matching
+``plugin_data`` keys. It does NOT receive the engine's context (narration is resolved
+across the plugin boundary). Returns the message to show."""
+
+Narration: TypeAlias = str | Sequence[str] | NarrationFn
+"""How a tool authors its in-progress status message. A plain string, several alternative
+strings (one is picked at random per call), or a function (see :data:`NarrationFn`).
+The function form is resolved to a string server-side; only the string crosses the wire."""
+
+
 @dataclass(frozen=True)
 class Tool:
     """A tool that can be used by agents to perform actions or retrieve information."""
@@ -277,8 +291,26 @@ class Tool:
     overlap: ToolOverlap
     """Defines how this tool overlaps with other tools in context. This is used to determine whether the tool should be evaluated in conjunction with other tools to prevent conflicts."""
 
+    narration: str | Sequence[str] | None = None
+    """Message(s) to show in the agent's "thinking" status while this tool runs, instead
+    of the generic default. The resolved, serializable form: a string, or several
+    alternatives (one picked at random). A function-form narration (see :data:`Narration`)
+    is resolved to a string server-side before reaching here. ``None`` means use the default."""
+
     def __hash__(self) -> int:
         return hash(self.name)
+
+
+def pick_narration(narration: str | Sequence[str] | None) -> str | None:
+    """Pick the narration message to show: the string as-is, a random one of several
+    alternatives, or ``None`` when there's nothing to show (so the caller falls back to
+    its default status text). The function form is already resolved to a string by the
+    time it reaches here."""
+    if not narration:
+        return None
+    if isinstance(narration, str):
+        return narration
+    return random.choice(list(narration))
 
 
 class ToolId(NamedTuple):
