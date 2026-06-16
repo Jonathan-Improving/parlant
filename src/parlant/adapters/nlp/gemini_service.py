@@ -834,47 +834,6 @@ class Gemini_3_5_Flash(GeminiSchematicGenerator[T]):
         return await super().generate(prompt, {**hints})
 
 
-class Gemini_3_5_Flash_LowReasoning(GeminiSchematicGenerator[T]):
-    """Gemini 3.5 Flash with thinking pinned to the lowest level.
-
-    Used for cheap, latency-sensitive Compass stages (e.g. the guideline distiller)
-    where a short chain of thought is enough and full reasoning would only add cost
-    and latency.
-    """
-
-    def __init__(
-        self, logger: Logger, tracer: Tracer, meter: Meter, health_reporter: HealthReporter
-    ) -> None:
-        super().__init__(
-            model_name="gemini-3.5-flash",
-            logger=logger,
-            tracer=tracer,
-            meter=meter,
-            health_reporter=health_reporter,
-        )
-
-    @property
-    @override
-    def max_tokens(self) -> int:
-        return 1024 * 1024
-
-    @override
-    async def generate(
-        self,
-        prompt: str | PromptBuilder,
-        hints: Mapping[str, Any] = {},
-    ) -> SchematicGenerationResult[T]:
-        return await super().generate(
-            prompt,
-            {
-                "thinking_config": google.genai.types.ThinkingConfig(
-                    thinking_level=google.genai.types.ThinkingLevel.LOW
-                ),
-                **hints,
-            },
-        )
-
-
 # The key under which Gemini's per-part ``thought_signature`` is preserved in a
 # canonical Part's ``provider_data``. It MUST round-trip verbatim, or replaying
 # tool-calling history triggers a 400 "missing thought_signature".
@@ -1701,13 +1660,8 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
     async def get_schematic_generator(
         self, t: type[T], hints: SchematicGeneratorHints = {}
     ) -> GeminiSchematicGenerator[T]:
-        if t is GuidelineRankSchema:
+        if t in (GuidelineRankSchema, GuidelineDistillSchema):
             return Gemini_3_1_Flash_Lite[t](  # type: ignore
-                self.logger, self._tracer, self._meter, self._health_reporter
-            )
-
-        if t is GuidelineDistillSchema:
-            return Gemini_3_5_Flash_LowReasoning[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
 
