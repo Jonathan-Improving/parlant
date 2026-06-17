@@ -16,17 +16,21 @@ from parlant.core.agents import Effort
 from parlant.core.engines.compass.response_state import EngineContext
 
 
-def get_dynamic_reasoning_effort(context: EngineContext) -> str:
+def get_dynamic_reasoning_effort_for_matching(context: EngineContext) -> str:
     """Map the context's dynamic effort level to a model ``reasoning_effort`` hint."""
     effort = context.state.dynamic_effort_level
+
+    # Note that low effort has higher reasoning than medium,
+    # because the assumption is that medium effort comes
+    # with added ARQs in its output anyway.
 
     match effort:
         case Effort.MIN:
             return "minimal"
         case Effort.LOW:
-            return "minimal"
-        case Effort.MEDIUM:
             return "low"
+        case Effort.MEDIUM:
+            return "minimal"
         case Effort.HIGH:
             return "low"
         case Effort.MAX:

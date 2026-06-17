@@ -30,7 +30,7 @@ from parlant.core.engines.compass.guideline_matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )
-from parlant.core.engines.compass.common import get_dynamic_reasoning_effort
+from parlant.core.engines.compass.common import get_dynamic_reasoning_effort_for_matching
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
 from parlant.core.loggers import Logger
@@ -151,7 +151,7 @@ class GuidelineRanker:
         inference = await self._schematic_generator.generate(
             prompt=prompt,
             hints={
-                "reasoning_effort": get_dynamic_reasoning_effort(context),
+                "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
                 "cache": {
                     "key": self._cache_key(context),
                     "breakpoint": self._cache_breakpoint(context),
@@ -223,7 +223,7 @@ class GuidelineRanker:
                 inference = await self._schematic_generator.generate(
                     prompt=prompt,
                     hints={
-                        "reasoning_effort": get_dynamic_reasoning_effort(context),
+                        "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
                         "cache": {
                             "key": self._cache_key(context),
                             "breakpoint": self._cache_breakpoint(context),
