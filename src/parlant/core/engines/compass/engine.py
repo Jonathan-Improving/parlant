@@ -133,9 +133,21 @@ class CompassEngine(Engine):
             # tools that just ran.
             await self._responder.respond(engine_context, self._refresh_state)
 
-            await self._compact_if_needed(engine_context)
+            # Post-response finalization. Refresh the interaction with this turn's reply
+            # (so compaction's trigger/summary and the cache prefill work off fresh data
+            # — the responder persisted the reply but didn't update the in-memory
+            # snapshot), compact if needed, then warm next turn's cache. Run as one
+            # uncancellable unit: the response already went out, so a mid-finalization
+            # cancellation must not leave the session half-compacted or the cache
+            # un-warmed.
+            async def finalize_turn(latch: CancellationSuppressionLatch[None]) -> None:
+                latch.enable()
 
-            await self._matcher.prefill(engine_context)  # Optimize the cache for the next turn
+                await self._refresh_interaction_history(engine_context)
+                await self._compact_if_needed(engine_context)
+                await self._matcher.prefill(engine_context)  # Optimize the cache for next turn
+
+            await latched_shield(finalize_turn)
         except Exception as e:
             self._logger.error(
                 f"Error processing context: {e}\n\n{''.join(traceback.format_exception(type(e), e, e.__traceback__))}"
@@ -223,6 +235,12 @@ class CompassEngine(Engine):
             events=events,
         )
 
+    async def _refresh_interaction_history(self, context: EngineContext) -> None:
+        # Reload the interaction from the store so it reflects events persisted during
+        # this process() call (notably the agent's reply). Called after responding so
+        # downstream steps — compaction and the cache prefill — work off fresh data.
+        context.interaction = await self._load_interaction_state(context.info, context.state)
+
     def _is_compaction_event(self, event: Event) -> bool:
         return (
             event.kind == EventKind.MESSAGE
@@ -234,6 +252,9 @@ class CompassEngine(Engine):
         return cast(MessageEventData, event.data)["message"]
 
     async def _compact_if_needed(self, context: EngineContext) -> None:
+        # Runs inside `process`'s post-response uncancellable finalization, so it
+        # doesn't shield itself; it only guards against errors so a compaction failure
+        # can't fail the turn whose response already went out.
         try:
             if not await self._compacter.needs_compaction(context):
                 return
@@ -243,30 +264,16 @@ class CompassEngine(Engine):
                 data=StatusEventData(status="processing", message="Compacting session"),
             )
 
-            # The trigger decision may use the pre-response in-memory interaction,
-            # but the summary itself must include persisted events emitted by this
-            # process() call before the compaction marker is appended.
-            context.interaction = await self._load_interaction_state(context.info, context.state)
+            result = await self._compacter.compact(context)
+            context.state.session_summary = result.summary
 
-            async def uncancellable_compaction(
-                latch: CancellationSuppressionLatch[None],
-            ) -> None:
-                latch.enable()
+            self._logger.debug(f"Compacted session {context.session.id}: {result.generation_info}")
 
-                result = await self._compacter.compact(context)
-                context.state.session_summary = result.summary
-
-                self._logger.debug(
-                    f"Compacted session {context.session.id}: {result.generation_info}"
-                )
-
-                await context.session_event_emitter.emit_system_message_event(
-                    trace_id=self._tracer.trace_id,
-                    data=result.summary,
-                    metadata={"source": "compacter"},
-                )
-
-            await latched_shield(uncancellable_compaction)
+            await context.session_event_emitter.emit_system_message_event(
+                trace_id=self._tracer.trace_id,
+                data=result.summary,
+                metadata={"source": "compacter"},
+            )
         except Exception as exc:
             self._logger.error(
                 "Session compaction failed after response generation: "

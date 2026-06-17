@@ -83,6 +83,15 @@ class GuidelineRanker:
     GUIDELINE_CACHE_BREAKPOINT = "- Guideline: ###"
     REASONING_CACHE_BREAKPOINT = "AGENT'S REASONING SO FAR THIS TURN"
     STAGED_EVENTS_CACHE_BREAKPOINT = "STAGED EVENTS"
+    CURRENT_TURN_CACHE_BREAKPOINT = "# CURRENT TURN"
+
+    # Message sources counted as "the agent's reply" — the boundary the cached
+    # interaction history is truncated at (everything after is this turn's tail).
+    _AGENT_MESSAGE_SOURCES = (
+        EventSource.AI_AGENT,
+        EventSource.HUMAN_AGENT_ON_BEHALF_OF_AI_AGENT,
+        EventSource.HUMAN_AGENT,
+    )
 
     def __init__(
         self,
@@ -190,11 +199,10 @@ class GuidelineRanker:
         return f"{context.session.id}.guideline-ranker"
 
     def _cache_breakpoint(self, context: EngineContext) -> str:
-        if context.state.reasoning_steps:
-            return self.REASONING_CACHE_BREAKPOINT
-        if context.state.tool_events:
-            return self.STAGED_EVENTS_CACHE_BREAKPOINT
-        return self.GUIDELINE_CACHE_BREAKPOINT
+        # The shared prefix always ends right before the per-turn "# CURRENT TURN"
+        # section, so the cache boundary is fixed — independent of which per-turn
+        # sections (latest message, staged events, reasoning) happen to be present.
+        return self.CURRENT_TURN_CACHE_BREAKPOINT
 
     async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the ranker's shared prompt prefix.
@@ -302,9 +310,23 @@ class GuidelineRanker:
         shots: Sequence[GuidelineRankingShot],
     ) -> PromptBuilder:
         # Start from the cross-turn-stable shared prefix, then append the
-        # turn-varying tail. The cache breakpoint points at the first existing
-        # tail section that will be present for this context.
+        # turn-varying tail. The tail opens with a fixed "# CURRENT TURN" marker (the
+        # cache breakpoint); everything before it is the cacheable prefix.
         builder = self._build_shared_prompt(context, shots)
+
+        # The customer's latest message(s) were split out of the cached history (see
+        # `_build_shared_prompt`); render them here, in the live suffix, so the cached
+        # prefix stays identical from one turn's `prefill` to the next turn's matching.
+        _, trailing_events = self._split_interaction_at_last_agent_reply(context.interaction.events)
+        builder.add_section(
+            name="guideline-ranker-current-turn",
+            template="""
+# CURRENT TURN
+{current_turn_text}
+""",
+            props={"current_turn_text": self._format_current_turn(builder, trailing_events)},
+            status=SectionStatus.ACTIVE,
+        )
 
         # Per-step reasoning goes in the tail (not the cached shared prefix) so the
         # cache stays valid while the matching tracks the agent's evolving reasoning.
@@ -429,12 +451,48 @@ Important considerations:
         builder.add_capabilities_for_guideline_matching(context.state.capabilities)
         if context.state.session_summary:
             builder.add_session_summary(context.state.session_summary)
+        # Cache only the history through the agent's last reply; the trailing customer
+        # message(s) are rendered in the per-turn tail (see `_build_prompt`), keeping
+        # this prefix byte-identical from one turn's `prefill` to the next turn's
+        # matching (which only appends the new customer message).
+        cached_events, _ = self._split_interaction_at_last_agent_reply(context.interaction.events)
         builder.add_interaction_history(
-            context.interaction.events,
+            cached_events,
             format=EventAdaptationFormat.ROLE_SCRIPT,
         )
 
         return builder
+
+    def _split_interaction_at_last_agent_reply(
+        self,
+        events: Sequence[Event],
+    ) -> tuple[Sequence[Event], Sequence[Event]]:
+        """Split the interaction into the cross-turn-stable head (through the agent's
+        last reply) and the per-turn tail (the customer message(s) that arrived after
+        it). Caching only the head lets the prefix `prefill` warms at the end of a turn
+        be reused by the next turn's matching, which merely appends the new message."""
+        cutoff = 0
+        for index, event in enumerate(events):
+            if event.kind == EventKind.MESSAGE and event.source in self._AGENT_MESSAGE_SOURCES:
+                cutoff = index + 1
+        return events[:cutoff], events[cutoff:]
+
+    def _format_current_turn(
+        self,
+        builder: PromptBuilder,
+        events: Sequence[Event],
+    ) -> str:
+        rendered = [
+            builder.adapt_event(event, format=EventAdaptationFormat.ROLE_SCRIPT)
+            for event in events
+            if event.kind != EventKind.STATUS
+        ]
+        if not rendered:
+            return "(No new customer message has arrived yet.)"
+        return (
+            "The following continues the interaction history above — the customer's "
+            "most recent message(s):\n" + "\n".join(rendered)
+        )
 
     def _format_output(self, context: EngineContext) -> str:
         result: dict[str, JSONSerializable] = {}
