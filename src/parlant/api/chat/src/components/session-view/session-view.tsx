@@ -37,6 +37,10 @@ const SessionView = (): ReactElement => {
 	const [showTyping, setShowTyping] = useState(false);
 	const [showThinking, setShowThinking] = useState(false);
 	const [thinkingDisplay, setThinkingDisplay] = useState('');
+	const [showThinkingElapsed, setShowThinkingElapsed] = useState(false);
+	const [thinkingElapsedSeconds, setThinkingElapsedSeconds] = useState(0);
+	const thinkingTimerStartedAtRef = useRef<number | null>(null);
+	const thinkingTimerKeyRef = useRef<string | null>(null);
 	const [isFirstScroll, setIsFirstScroll] = useState(true);
 	const {openQuestionDialog, closeQuestionDialog} = useQuestionDialog();
 	const [useContentFiltering, setUseContentFiltering] = useState(false);
@@ -249,6 +253,27 @@ const SessionView = (): ReactElement => {
 				// Prefer the chunked-status `message` (joined chunks); fall back to the
 				// legacy `data.stage` field or the generic "Thinking" placeholder.
 				setThinkingDisplay(lastStatusEvent?.data?.message ?? lastStatusEvent?.data?.data?.stage ?? 'Thinking');
+
+				const isNonChunkedProcessingStatus = lastStatusEvent?.data?.chunks === undefined && !!lastStatusEvent?.data?.message;
+				setShowThinkingElapsed(isNonChunkedProcessingStatus);
+
+				if (isNonChunkedProcessingStatus) {
+					const timerKey = `${lastStatusEvent?.id ?? lastStatusEvent?.offset ?? ''}:${lastStatusEvent?.data?.message ?? ''}`;
+					if (thinkingTimerKeyRef.current !== timerKey) {
+						thinkingTimerKeyRef.current = timerKey;
+						thinkingTimerStartedAtRef.current = performance.now();
+						setThinkingElapsedSeconds(0);
+					}
+				} else {
+					thinkingTimerKeyRef.current = null;
+					thinkingTimerStartedAtRef.current = null;
+					setThinkingElapsedSeconds(0);
+				}
+			} else {
+				setShowThinkingElapsed(false);
+				thinkingTimerKeyRef.current = null;
+				thinkingTimerStartedAtRef.current = null;
+				setThinkingElapsedSeconds(0);
 			}
 
 			// Don't show typing if we already have a streaming message arriving
@@ -404,6 +429,20 @@ const SessionView = (): ReactElement => {
 
 		return () => clearInterval(timer);
 	}, [showThinking]);
+
+	useEffect(() => {
+		if (!showThinking || !showThinkingElapsed || thinkingTimerStartedAtRef.current === null) return;
+
+		const updateElapsed = () => {
+			if (thinkingTimerStartedAtRef.current === null) return;
+			setThinkingElapsedSeconds((performance.now() - thinkingTimerStartedAtRef.current) / 1000);
+		};
+
+		updateElapsed();
+		const timer = setInterval(updateElapsed, 100);
+
+		return () => clearInterval(timer);
+	}, [showThinking, showThinkingElapsed]);
 
 	// Follow the reasoning as it types out: pin the scroll container to its bottom
 	// on every reveal tick (and on each new chunk), so the growing multi-line
@@ -613,6 +652,8 @@ const SessionView = (): ReactElement => {
 		setShowLogsForMessage(event.id === showLogsForMessage?.id ? null : event);
 	};
 
+	const thinkingElapsedLabel = `${thinkingElapsedSeconds.toFixed(1)}s`;
+
 	return (
 		<>
 			<div ref={messagesRef} className={twMerge('flex items-center h-full w-full bg-white gap-[14px] rounded-[10px]', showLogsForMessage && 'bg-green-light')}>
@@ -666,7 +707,7 @@ const SessionView = (): ReactElement => {
 											</>
 										)}
 										{showThinking && (
-											<div className={twMerge('flex items-start gap-[8px] font-normal text-[#A9AFB7] text-[14px] font-inter')}>
+											<div className={twMerge('flex items-start gap-[8px] ps-[16px] font-normal text-[#A9AFB7] text-[14px] font-inter')}>
 												{/* Spinner pinned to the top (items-start + shrink-0) so it stays put as the stage text grows/wraps. */}
 												<LoaderCircle aria-hidden='true' className='shrink-0 size-[16px] mt-[2px] animate-spin' />
 												{/* items-center keeps the revealed markdown and the trailing "..." inline, as before. */}
@@ -674,6 +715,7 @@ const SessionView = (): ReactElement => {
 													{/* Live markdown rendering of the in-flight reveal prefix. */}
 													<Markdown>{thinkingDisplay.slice(0, thinkingRevealed)}</Markdown>
 													...
+													{showThinkingElapsed && <span className='ms-[4px] tabular-nums'>({thinkingElapsedLabel})</span>}
 												</div>
 											</div>
 										)}
