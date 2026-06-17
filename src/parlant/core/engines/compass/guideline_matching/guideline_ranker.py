@@ -243,7 +243,7 @@ class GuidelineRanker:
         return Guideline(
             id=GuidelineId("cache-prefill-guideline"),
             creation_utc=datetime.now(timezone.utc),
-            last_modified_utc=datetime.now(timezone.utc),
+            modified_utc=datetime.now(timezone.utc),
             content=GuidelineContent(
                 condition="the cache is being warmed before guideline ranking",
                 action="return a low relevance score",

@@ -162,7 +162,7 @@ class GuidelineDistiller:
         }
 
         if high_effort:
-            inference = await self._high_effort_schematic_generator.generate(
+            high_effort_inference = await self._high_effort_schematic_generator.generate(
                 prompt=prompt,
                 hints=hints,
             )
@@ -170,35 +170,35 @@ class GuidelineDistiller:
             return (
                 DistilledGuideline(
                     guideline=guideline,
-                    reasoning=inference.content.reasoning,
-                    is_relevant=inference.content.is_relevant,
-                    distilled_action=inference.content.distilled_action,
+                    reasoning=high_effort_inference.content.reasoning,
+                    is_relevant=high_effort_inference.content.is_relevant,
+                    distilled_action=high_effort_inference.content.distilled_action,
                 ),
-                inference.info,
+                high_effort_inference.info,
+            )
+        else:
+            low_effort_inference = await self._low_effort_schematic_generator.generate(
+                prompt=prompt,
+                hints=hints,
             )
 
-        inference = await self._low_effort_schematic_generator.generate(
-            prompt=prompt,
-            hints=hints,
-        )
+            distilled_action = (
+                low_effort_inference.content.distilled_action.strip()
+                if low_effort_inference.content.distilled_action
+                else None
+            )
 
-        distilled_action = (
-            inference.content.distilled_action.strip()
-            if inference.content.distilled_action
-            else None
-        )
-
-        return (
-            DistilledGuideline(
-                guideline=guideline,
-                reasoning="Relevant. The distiller returned a next-step action."
-                if distilled_action
-                else "Not relevant. The distiller returned no next-step action.",
-                is_relevant=distilled_action is not None,
-                distilled_action=distilled_action,
-            ),
-            inference.info,
-        )
+            return (
+                DistilledGuideline(
+                    guideline=guideline,
+                    reasoning="Relevant. The distiller returned a next-step action."
+                    if distilled_action
+                    else "Not relevant. The distiller returned no next-step action.",
+                    is_relevant=distilled_action is not None,
+                    distilled_action=distilled_action,
+                ),
+                low_effort_inference.info,
+            )
 
     def _should_use_high_effort_schema(self, context: EngineContext) -> bool:
         return context.state.dynamic_effort_level in (Effort.HIGH, Effort.MAX)
@@ -252,7 +252,7 @@ class GuidelineDistiller:
         return Guideline(
             id=GuidelineId("cache-prefill-guideline"),
             creation_utc=datetime.now(timezone.utc),
-            last_modified_utc=datetime.now(timezone.utc),
+            modified_utc=datetime.now(timezone.utc),
             content=GuidelineContent(
                 condition="the cache is being warmed before guideline distillation",
                 action="determine that no real customer guidance is required",

@@ -12,15 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import Self
 
-if TYPE_CHECKING:
-    from parlant.core.engines.compass.response_state import EngineContext
+from parlant.core.engines.compass.response_state import EngineContext
 
 
 DEFAULT_PREAMBLE_INTERVAL_SECONDS = 15.0
@@ -63,7 +60,7 @@ class PreambleEmissionPolicy(Enum):
     """Never emit pre-tool text; tool calls should run silently."""
 
 
-PreambleNoteFactory = Callable[["EngineContext", PreambleDecision, float], str | None]
+PreambleNoteFactory = Callable[[EngineContext, PreambleDecision, float], str | None]
 """Builds the per-step prompt note for a preamble decision.
 
 Return ``None`` to avoid adding any preamble-related prompt note. The arguments
@@ -100,7 +97,7 @@ class PreambleConfiguration:
     """Runtime policy for model text that appears immediately before a tool call."""
 
     @classmethod
-    def default(cls) -> "PreambleConfiguration":
+    def default(cls) -> Self:
         """Do not add prompt notes or special runtime handling for preambles."""
 
         return cls()
@@ -110,7 +107,7 @@ class PreambleConfiguration:
         cls,
         *,
         interval_seconds: float = DEFAULT_PREAMBLE_INTERVAL_SECONDS,
-    ) -> "PreambleConfiguration":
+    ) -> Self:
         """Use the current Compass behavior for tool progress updates.
 
         The responder receives dynamic notes encouraging one short preamble
@@ -130,7 +127,7 @@ class PreambleConfiguration:
         cls,
         *,
         interval_seconds: float = DEFAULT_PREAMBLE_INTERVAL_SECONDS,
-    ) -> "PreambleConfiguration":
+    ) -> Self:
         """Discourage and suppress pre-tool progress messages.
 
         The responder receives a note asking it to run tools silently, and the
@@ -143,7 +140,7 @@ class PreambleConfiguration:
             emission_policy=PreambleEmissionPolicy.SUPPRESS,
         )
 
-    def note_for(self, context: "EngineContext", decision: PreambleDecision) -> str | None:
+    def note_for(self, context: EngineContext, decision: PreambleDecision) -> str | None:
         """Return the prompt note to add for this step, if any."""
 
         if self.note_factory is None:
@@ -172,7 +169,7 @@ class PreambleConfiguration:
 
 
 def _encourage_note(
-    _context: "EngineContext",
+    _context: EngineContext,
     decision: PreambleDecision,
     interval_seconds: float,
 ) -> str:
@@ -206,7 +203,7 @@ def _encourage_note(
 
 
 def _discourage_note(
-    _context: "EngineContext",
+    _context: EngineContext,
     _decision: PreambleDecision,
     _interval_seconds: float,
 ) -> str:
