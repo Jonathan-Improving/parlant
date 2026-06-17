@@ -51,6 +51,7 @@ from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_next_
 )
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
 from parlant.core.engines.alpha.tool_calling.single_tool_batch import (
     NonConsequentialToolBatchSchema,
     SingleToolBatchSchema,
@@ -246,122 +247,98 @@ class OpenAISchematicGenerator(BaseSchematicGenerator[T]):
         if isinstance(prompt, PromptBuilder):
             prompt = prompt.build()
 
-        openai_api_arguments = self._list_arguments(hints)
+        # Route through the Responses API (not Chat Completions): the React generator
+        # uses Responses and its prompt cache engages, whereas Chat Completions wasn't
+        # caching for the schematic fan-out.
+        list_arguments = self._list_arguments(hints)
+
+        request: dict[str, Any] = {
+            "model": self.model_name,
+            "input": [{"role": "developer", "content": prompt}],
+            "store": False,
+        }
+        if "temperature" in list_arguments:
+            request["temperature"] = list_arguments["temperature"]
+        if "max_tokens" in list_arguments:
+            request["max_output_tokens"] = list_arguments["max_tokens"]
 
         effort = hints.get(REASONING_EFFORT_HINT)
         if effort is not None:
-            openai_api_arguments = {**openai_api_arguments, **self._reasoning_arguments(effort)}
+            reasoning_arguments = self._reasoning_arguments(effort)
+            if reasoning_arguments:
+                request["reasoning"] = {"effort": reasoning_arguments["reasoning_effort"]}
 
-        if hints.get("strict", False):
-            t_start = time.time()
-            try:
-                response = await self._client.beta.chat.completions.parse(
-                    messages=[{"role": "developer", "content": prompt}],
-                    model=self.model_name,
-                    response_format=self.schema,
-                    **openai_api_arguments,
+        # `prompt_cache_key` keeps same-prefix requests (a fan-out and its prefill) on the
+        # same cache node so they reuse it. OpenAI ignores the breakpoint — it has no
+        # explicit cache resource, it auto-caches the longest common prefix.
+        cache_key = (hints.get("cache") or {}).get("key")
+        if cache_key is not None:
+            request["prompt_cache_key"] = cache_key
+
+        t_start = time.time()
+        try:
+            if hints.get("strict", False):
+                parsed = await self._client.responses.parse(text_format=self.schema, **request)
+                content = parsed.output_parsed
+                assert content is not None
+                usage = parsed.usage
+            else:
+                response = await self._client.responses.create(
+                    text={"format": {"type": "json_object"}}, **request
                 )
-            except RateLimitError:
-                self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-                raise
+                raw_content = response.output_text or "{}"
+                try:
+                    json_content = json.loads(normalize_json_output(raw_content))
+                except json.JSONDecodeError:
+                    self.logger.warning(
+                        f"Invalid JSON returned by {self.model_name}:\n{raw_content})"
+                    )
+                    json_content = jsonfinder.only_json(raw_content)[2]
+                    self.logger.warning("Found JSON content within model response; continuing...")
+                content = self.schema.model_validate(json_content)
+                usage = response.usage
 
             t_end = time.time()
 
-            parsed_object = response.choices[0].message.parsed
-            assert parsed_object
-
-            assert response.usage
-            assert response.usage.prompt_tokens_details
+            input_tokens = (usage.input_tokens if usage else 0) or 0
+            output_tokens = (usage.output_tokens if usage else 0) or 0
+            cached_input_tokens = (
+                usage.input_tokens_details.cached_tokens
+                if usage and usage.input_tokens_details
+                else 0
+            ) or 0
 
             await record_llm_metrics(
                 self.meter,
                 self.model_name,
                 schema_name=self.schema.__name__,
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-                cached_input_tokens=response.usage.prompt_tokens_details.cached_tokens or 0,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_input_tokens=cached_input_tokens,
             )
 
             return SchematicGenerationResult[T](
-                content=parsed_object,
+                content=content,
                 info=GenerationInfo(
                     schema_name=self.schema.__name__,
                     model=self.id,
                     duration=(t_end - t_start),
                     usage=UsageInfo(
-                        input_tokens=response.usage.prompt_tokens,
-                        output_tokens=response.usage.completion_tokens,
-                        extra={
-                            "cached_input_tokens": response.usage.prompt_tokens_details.cached_tokens
-                            or 0
-                        },
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        extra={"cached_input_tokens": cached_input_tokens},
                     ),
                 ),
             )
-
-        else:
-            try:
-                t_start = time.time()
-                response = await self._client.chat.completions.create(
-                    messages=[{"role": "developer", "content": prompt}],
-                    model=self.model_name,
-                    response_format={"type": "json_object"},
-                    **openai_api_arguments,
-                )
-                t_end = time.time()
-            except RateLimitError:
-                self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-                raise
-
-            if response.usage:
-                self.logger.trace(response.usage.model_dump_json(indent=2))
-
-            raw_content = response.choices[0].message.content or "{}"
-
-            try:
-                json_content = json.loads(normalize_json_output(raw_content))
-            except json.JSONDecodeError:
-                self.logger.warning(f"Invalid JSON returned by {self.model_name}:\n{raw_content})")
-                json_content = jsonfinder.only_json(raw_content)[2]
-                self.logger.warning("Found JSON content within model response; continuing...")
-
-            try:
-                content = self.schema.model_validate(json_content)
-
-                assert response.usage
-                assert response.usage.prompt_tokens_details
-
-                await record_llm_metrics(
-                    self.meter,
-                    self.model_name,
-                    schema_name=self.schema.__name__,
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    cached_input_tokens=response.usage.prompt_tokens_details.cached_tokens or 0,
-                )
-
-                return SchematicGenerationResult(
-                    content=content,
-                    info=GenerationInfo(
-                        schema_name=self.schema.__name__,
-                        model=self.id,
-                        duration=(t_end - t_start),
-                        usage=UsageInfo(
-                            input_tokens=response.usage.prompt_tokens,
-                            output_tokens=response.usage.completion_tokens,
-                            extra={
-                                "cached_input_tokens": response.usage.prompt_tokens_details.cached_tokens
-                                or 0
-                            },
-                        ),
-                    ),
-                )
-
-            except ValidationError as e:
-                self.logger.error(
-                    f"Error: {e.json(indent=2)}\nJSON content returned by {self.model_name} does not match expected schema:\n{raw_content}"
-                )
-                raise
+        except RateLimitError:
+            self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
+            raise
+        except ValidationError as e:
+            self.logger.error(
+                f"Error: {e.json(indent=2)}\n"
+                f"JSON returned by {self.model_name} does not match the expected schema."
+            )
+            raise
 
 
 class GPT_4o(OpenAISchematicGenerator[T]):
@@ -545,6 +522,26 @@ class GPT_5_4_Nano(OpenAISchematicGenerator[T]):
             health_reporter=health_reporter,
             # tiktoken doesn't know gpt-5.4-nano; use the gpt-5 tokenizer (same
             # family) for estimation.
+            tokenizer_model_name="gpt-5",
+        )
+
+    @property
+    @override
+    def max_tokens(self) -> int:
+        return 400_000
+
+
+class GPT_5_4_Mini(OpenAISchematicGenerator[T]):
+    def __init__(
+        self, logger: Logger, tracer: Tracer, meter: Meter, health_reporter: HealthReporter
+    ) -> None:
+        super().__init__(
+            model_name="gpt-5.4-mini",
+            logger=logger,
+            tracer=tracer,
+            meter=meter,
+            health_reporter=health_reporter,
+            # tiktoken doesn't know gpt-5.4-mini; use the gpt-5 tokenizer (same family).
             tokenizer_model_name="gpt-5",
         )
 
@@ -1325,6 +1322,8 @@ Please set OPENAI_API_KEY in your environment before running Parlant.
                     JourneyNextStepSelectionSchema: GPT_4_1[JourneyNextStepSelectionSchema],
                     JourneyBacktrackCheckSchema: GPT_4_1_Mini[JourneyBacktrackCheckSchema],
                     GuidelineRankSchema: GPT_5_4_Nano[GuidelineRankSchema],
+                    LowEffortReview: GPT_5_4_Mini[LowEffortReview],
+                    HighEffortReview: GPT_5_4_Mini[HighEffortReview],
                 }.get(t, GPT_4o_24_08_06[t])(  # type: ignore
                     self._logger, self._tracer, self._meter, self._health_reporter
                 )
