@@ -18,9 +18,17 @@ from typing import Any, cast
 from parlant.core.agents import Effort
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha.hooks import EngineHooks
-from parlant.core.engines.compass.loop.base_loop import _LoopState, _PROVIDER_DATA_KEY
+from parlant.core.engines.compass.loop.base_loop import (
+    _LoopState,
+    _PROVIDER_DATA_KEY,
+    _ToolPreambleState,
+)
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
 from parlant.core.engines.compass.loop.loop import LoopJob
+from parlant.core.engines.compass.preambles import (
+    DEFAULT_PREAMBLE_INTERVAL_SECONDS,
+    PreambleConfiguration,
+)
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.loggers import StdoutLogger
 from parlant.core.nlp.react import (
@@ -62,6 +70,10 @@ def _make_blocking_loop() -> BlockingLoop:
         reviewer=cast(Any, None),
         hooks=EngineHooks(),
     )
+
+
+def _encouraged_preamble_state() -> _ToolPreambleState:
+    return _ToolPreambleState(PreambleConfiguration.encourage())
 
 
 class _NoReplayReact:
@@ -346,7 +358,7 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
     context.state = ResponseState()
 
     loop = _make_blocking_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
 
     # As TurnBuilder assembles it: both text segments fold into ONE TextPart, with
     # the tool call sitting after them in part order.
@@ -386,7 +398,7 @@ async def test_that_blocking_tool_preamble_is_trimmed_to_one_sentence() -> None:
     context.state = ResponseState()
 
     loop = _make_blocking_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
 
     events = [
         TextDelta(text="I am checking the reservation status. "),
@@ -410,7 +422,7 @@ async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_co
     context.state = ResponseState()
 
     loop = _make_blocking_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
     loop._mark_user_visible_message_emitted(state)
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
@@ -445,10 +457,10 @@ async def test_that_blocking_tool_preambles_are_allowed_after_fifteen_seconds() 
     context.state = ResponseState()
 
     loop = _make_blocking_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
     loop._mark_user_visible_message_emitted(state)
     assert state.preamble.last_user_visible_message_at is not None
-    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    state.preamble.last_user_visible_message_at -= DEFAULT_PREAMBLE_INTERVAL_SECONDS + 1
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(

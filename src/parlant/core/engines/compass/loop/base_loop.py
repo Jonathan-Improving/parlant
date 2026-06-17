@@ -30,6 +30,7 @@ from parlant.core.emissions import MessageEventHandle, StatusEventHandle
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
 from parlant.core.engines.alpha.tool_calling.tool_caller import ToolInsights
+from parlant.core.engines.compass.preambles import PreambleConfiguration, PreambleDecision
 from parlant.core.engines.compass.response_state import EngineContext, IterationState
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob, LoopResult
 from parlant.core.engines.compass.tool_runner import ToolRunner
@@ -125,25 +126,20 @@ class SessionToolMessageDeserializer(ToolMessageDeserializer):
         return self._provider_data
 
 
-class _ToolPreambleDecision(Enum):
-    ALLOW_INITIAL = auto()
-    ALLOW_INTERVAL_UPDATE = auto()
-    SUPPRESS = auto()
-
-
 @dataclass
-class _ToolPreamblePolicy:
+class _ToolPreambleState:
+    configuration: PreambleConfiguration = field(default_factory=PreambleConfiguration.default)
     user_visible_message_emitted: bool = False
     last_user_visible_message_at: float | None = None
 
-    def decide(self, now: float, interval_seconds: float) -> _ToolPreambleDecision:
+    def decide(self, now: float) -> PreambleDecision:
         if not self.user_visible_message_emitted or self.last_user_visible_message_at is None:
-            return _ToolPreambleDecision.ALLOW_INITIAL
+            return PreambleDecision.ALLOW_INITIAL
 
-        if now - self.last_user_visible_message_at > interval_seconds:
-            return _ToolPreambleDecision.ALLOW_INTERVAL_UPDATE
+        if now - self.last_user_visible_message_at > self.configuration.interval_seconds:
+            return PreambleDecision.ALLOW_INTERVAL_UPDATE
 
-        return _ToolPreambleDecision.SUPPRESS
+        return PreambleDecision.SUPPRESS
 
     def mark_user_visible_message_emitted(self, now: float) -> None:
         self.user_visible_message_emitted = True
@@ -224,7 +220,7 @@ class _LoopState:
     reasoning_chunks: list[str | None] = field(default_factory=list)
 
     message: _MessageEmissionState = field(default_factory=_MessageEmissionState)
-    preamble: _ToolPreamblePolicy = field(default_factory=_ToolPreamblePolicy)
+    preamble: _ToolPreambleState = field(default_factory=_ToolPreambleState)
 
     disable_tools: bool = False
     force_message_note: str = ""
@@ -457,15 +453,14 @@ message from the user and should not be acknowledged directly:
 
 
 class _TurnInstructionBuilder:
-    def __init__(self, logger: Logger, preamble_interval_seconds: float) -> None:
+    def __init__(self, logger: Logger) -> None:
         self._logger = logger
-        self._preamble_interval_seconds = preamble_interval_seconds
 
     async def refresh(
         self,
         job: LoopJob,
         state: _LoopState,
-        preamble_decision: _ToolPreambleDecision,
+        preamble_decision: PreambleDecision,
         loop_name: str,
     ) -> None:
         if job.step_instructions is not None:
@@ -519,7 +514,7 @@ class _TurnInstructionBuilder:
         self,
         job: LoopJob,
         state: _LoopState,
-        preamble_decision: _ToolPreambleDecision,
+        preamble_decision: PreambleDecision,
     ) -> list[str]:
         reviewer_notes: list[str] = []
 
@@ -534,41 +529,13 @@ class _TurnInstructionBuilder:
                 "#### Suggested reasoning for the next step\n\n" + job.context.state.step_notes
             )
 
-        reviewer_notes.append(self._tool_communication_note(preamble_decision))
+        if preamble_note := job.preamble_config.note_for(job.context, preamble_decision):
+            reviewer_notes.append(preamble_note)
 
         if state.force_message_note:
             reviewer_notes.append("#### Required final response\n\n" + state.force_message_note)
 
         return reviewer_notes
-
-    def _tool_communication_note(self, preamble_decision: _ToolPreambleDecision) -> str:
-        match preamble_decision:
-            case _ToolPreambleDecision.ALLOW_INITIAL:
-                return (
-                    "#### Tool communication before tool use\n\n"
-                    "If you need to use *a new tool* for this step, you should first send "
-                    "exactly one short, natural sentence to the user about what you are "
-                    "checking (Checking X; Let me do Y; Just a moment while I Z...). Do not "
-                    'add a second "I\'m checking" or "let me check" sentence in the same '
-                    "message. Keep it specific to the current action, and avoid repeating "
-                    "wording from earlier messages."
-                )
-            case _ToolPreambleDecision.ALLOW_INTERVAL_UPDATE:
-                return (
-                    "#### Tool communication before tool use\n\n"
-                    f"More than {self._preamble_interval_seconds:g} seconds have passed since your last message to the user. "
-                    "If you need to use *a new tool* for this step, please update them on "
-                    "what you're currently doing before running the next tool. Send exactly "
-                    "one short sentence, and do not add another tool-progress sentence in "
-                    "the same message."
-                )
-            case _ToolPreambleDecision.SUPPRESS:
-                return (
-                    "#### Tool communication before tool use\n\n"
-                    f"Less than {self._preamble_interval_seconds:g} seconds have passed since your last message to the user. "
-                    "If you need to use another tool now, do not send another progress "
-                    "update or preamble before the tool call. Run the next tool silently."
-                )
 
 
 class _ReasoningEventProcessor:
@@ -897,7 +864,6 @@ class BaseLoop(Loop):
     # Retry a step on a transient ReactError, but only before any event has been
     # emitted (a stream can't be replayed mid-flight). Waits between attempts.
     _RETRY_TIMEOUT_PER_ATTTEMPT = (2.0, 8.0, 32.0)
-    _TOOL_PREAMBLE_INTERVAL_SECONDS = 15.0
     _SENTENCE_END_PATTERN = re.compile(r"(?<=[.!?])(?:\s+|$)")
 
     def __init__(
@@ -920,10 +886,7 @@ class BaseLoop(Loop):
         self._reviewer = reviewer
         self._hooks = hooks
         self._history_builder = _InteractionHistoryBuilder(logger, lambda: self._react)
-        self._turn_instruction_builder = _TurnInstructionBuilder(
-            logger,
-            self._TOOL_PREAMBLE_INTERVAL_SECONDS,
-        )
+        self._turn_instruction_builder = _TurnInstructionBuilder(logger)
         self._reasoning_event_processor = _ReasoningEventProcessor()
         self._tool_step_controller = _ToolStepController(
             logger,
@@ -961,7 +924,11 @@ class BaseLoop(Loop):
             return LoopResult(job=job, steps=[])
 
         history, instructions_index = await self._history_builder.build(job)
-        state = _LoopState(history=history, instructions_index=instructions_index)
+        state = _LoopState(
+            history=history,
+            instructions_index=instructions_index,
+            preamble=_ToolPreambleState(job.preamble_config),
+        )
 
         while not job.context.state.prepared_to_respond:
             try:
@@ -1123,17 +1090,14 @@ class BaseLoop(Loop):
     async def _get_tools(self, context: EngineContext) -> list[ToolSpec]:
         return [*tool_specs_from_tools(context.state.available_tools)]
 
-    def _tool_preamble_decision(self, state: _LoopState) -> _ToolPreambleDecision:
-        return state.preamble.decide(
-            time.monotonic(),
-            self._TOOL_PREAMBLE_INTERVAL_SECONDS,
-        )
+    def _tool_preamble_decision(self, state: _LoopState) -> PreambleDecision:
+        return state.preamble.decide(time.monotonic())
 
     def _tool_preamble_is_allowed(self, state: _LoopState) -> bool:
-        return self._tool_preamble_decision(state) in (
-            _ToolPreambleDecision.ALLOW_INITIAL,
-            _ToolPreambleDecision.ALLOW_INTERVAL_UPDATE,
-        )
+        return state.preamble.configuration.allows_emission(self._tool_preamble_decision(state))
+
+    def _should_trim_tool_preamble_text(self, state: _LoopState) -> bool:
+        return state.preamble.configuration.trims_preamble_text()
 
     def _mark_user_visible_message_emitted(self, state: _LoopState) -> None:
         state.preamble.mark_user_visible_message_emitted(time.monotonic())

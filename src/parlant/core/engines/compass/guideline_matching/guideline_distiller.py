@@ -60,7 +60,7 @@ class GuidelineDistillationResult:
     generation_info: GenerationInfo | None
 
 
-class GuidelineDistillationSchema(DefaultBaseModel):
+class HighEffortGuidelineDistillationSchema(DefaultBaseModel):
     reasoning: str
     is_relevant: bool
     distilled_action: Optional[str] = None
@@ -75,7 +75,7 @@ class GuidelineDistillationShot(Shot):
     interaction_events: Sequence[Event]
     # The distiller evaluates a single guideline per prompt, so each shot carries one.
     guideline: GuidelineContent
-    expected_result: GuidelineDistillationSchema
+    expected_result: HighEffortGuidelineDistillationSchema
 
 
 class GuidelineDistiller:
@@ -107,7 +107,7 @@ class GuidelineDistiller:
         logger: Logger,
         tracer: Tracer,
         low_effort_schematic_generator: SchematicGenerator[LowEffortGuidelineDistillationSchema],
-        high_effort_schematic_generator: SchematicGenerator[GuidelineDistillationSchema],
+        high_effort_schematic_generator: SchematicGenerator[HighEffortGuidelineDistillationSchema],
     ) -> None:
         self._logger = logger
         self._tracer = tracer
@@ -323,7 +323,7 @@ class GuidelineDistiller:
 
     def _format_expected_result(
         self,
-        expected_result: GuidelineDistillationSchema,
+        expected_result: HighEffortGuidelineDistillationSchema,
         high_effort: bool,
     ) -> dict[str, JSONSerializable]:
         if high_effort:
@@ -493,9 +493,7 @@ The exact format of your response will be provided later in this prompt.
                 "applicability_output_instruction": self._applicability_output_instruction(
                     high_effort
                 ),
-                "already_completed_instruction": self._already_completed_instruction(
-                    high_effort
-                ),
+                "already_completed_instruction": self._already_completed_instruction(high_effort),
             },
         )
         builder.add_section(
@@ -693,7 +691,7 @@ example_1_guideline = GuidelineContent(
     ),
 )
 
-example_1_expected = GuidelineDistillationSchema(
+example_1_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer wants to book a flight and has already provided the source and "
         "destination airports, so the journey is in progress. The next step in the action "
@@ -729,7 +727,7 @@ example_2_guideline = GuidelineContent(
     action="Provide links or suggestions for flight aggregators and hotel booking platforms.",
 )
 
-example_2_expected = GuidelineDistillationSchema(
+example_2_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer is asking about visas and travel documents, not about booking flights "
         "or accommodation, so the condition does not apply to the current state of the "
@@ -754,7 +752,7 @@ example_3_guideline = GuidelineContent(
     action="provide the price using the 'check_stock_price' tool",
 )
 
-example_3_expected = GuidelineDistillationSchema(
+example_3_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer is asking about the value of the S&P 500, so the guideline applies. "
         "Its action is a single concrete instruction, so it should be taken as is."
@@ -788,7 +786,7 @@ example_4_guideline = GuidelineContent(
     action="Ask for their account ID to verify their identity",
 )
 
-example_4_expected = GuidelineDistillationSchema(
+example_4_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer is still asking for account-related help, but they already provided "
         "their account ID earlier and it remains valid for this request, so the action has "
@@ -826,7 +824,7 @@ example_5_guideline = GuidelineContent(
     action="Ask for their preferred activities and recommend accordingly",
 )
 
-example_5_expected = GuidelineDistillationSchema(
+example_5_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer raised a new trip — a winter trip to Europe — so the condition arose "
         "again for a new reason and the action should be reapplied. Their preferred "
@@ -864,7 +862,7 @@ example_6_guideline = GuidelineContent(
     ),
 )
 
-example_6_expected = GuidelineDistillationSchema(
+example_6_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer changed the date, returning to an earlier step of the action. The home "
         "address they already gave is still valid, so there's no need to ask for it again. The "
@@ -898,7 +896,7 @@ example_7_guideline = GuidelineContent(
     ),
 )
 
-example_7_expected = GuidelineDistillationSchema(
+example_7_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer wants to downgrade and asks whether they can switch again later this "
         "month, so the guideline applies. The downgrade-timing rule and the once-per-cycle "
@@ -935,7 +933,7 @@ example_8_guideline = GuidelineContent(
     ),
 )
 
-example_8_expected = GuidelineDistillationSchema(
+example_8_expected = HighEffortGuidelineDistillationSchema(
     reasoning=(
         "The customer wants to book catering for 8 guests, so the deposit rule applies. The "
         "deposit is $25 per guest, which for 8 guests is $200 - that amount must be stated, "

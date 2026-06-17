@@ -16,9 +16,13 @@ from typing import Any, cast
 
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.engines.alpha.hooks import EngineHooks
-from parlant.core.engines.compass.loop.base_loop import _LoopState
+from parlant.core.engines.compass.loop.base_loop import _LoopState, _ToolPreambleState
 from parlant.core.engines.compass.loop.loop import LoopJob
 from parlant.core.engines.compass.loop.streaming_loop import StreamingLoop
+from parlant.core.engines.compass.preambles import (
+    DEFAULT_PREAMBLE_INTERVAL_SECONDS,
+    PreambleConfiguration,
+)
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.loggers import StdoutLogger
 from parlant.core.nlp.react import (
@@ -55,6 +59,10 @@ def _make_streaming_loop() -> StreamingLoop:
         reviewer=cast(Any, None),
         hooks=EngineHooks(),
     )
+
+
+def _encouraged_preamble_state() -> _ToolPreambleState:
+    return _ToolPreambleState(PreambleConfiguration.encourage())
 
 
 async def test_that_turn_instructions_are_placed_before_the_last_customer_message() -> None:
@@ -116,7 +124,7 @@ async def test_that_reviewer_adjusted_reasoning_is_injected_even_without_step_in
     assert any("ask for confirmation first" in m.text for m in state.history)
 
 
-async def test_that_tool_preamble_note_is_injected_initially_and_after_fifteen_seconds() -> None:
+async def test_that_default_preamble_configuration_does_not_inject_tool_preamble_note() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
     context.state = ResponseState()
 
@@ -128,12 +136,36 @@ async def test_that_tool_preamble_note_is_injected_initially_and_after_fifteen_s
 
     await loop._update_step_instructions(job, state)
     instructions_text = "\n".join(message.text for message in state.history)
+    assert "Tool communication before tool use" not in instructions_text
+
+
+async def test_that_tool_preamble_note_is_injected_initially_and_after_fifteen_seconds() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
+    context.state = ResponseState()
+
+    loop = _make_streaming_loop()
+    job = LoopJob(
+        context=context,
+        system_instructions="SYSTEM",
+        step_instructions=None,
+        preamble_config=PreambleConfiguration.encourage(),
+    )
+
+    history, instructions_index = await loop._build_history(job)
+    state = _LoopState(
+        history=history,
+        instructions_index=instructions_index,
+        preamble=_encouraged_preamble_state(),
+    )
+
+    await loop._update_step_instructions(job, state)
+    instructions_text = "\n".join(message.text for message in state.history)
     assert "Tool communication before tool use" in instructions_text
     assert "exactly one short, natural sentence" in instructions_text
 
     loop._mark_user_visible_message_emitted(state)
     assert state.preamble.last_user_visible_message_at is not None
-    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS - 1
+    state.preamble.last_user_visible_message_at -= DEFAULT_PREAMBLE_INTERVAL_SECONDS - 1
     await loop._update_step_instructions(job, state)
     instructions_text = "\n".join(message.text for message in state.history)
     assert "Tool communication before tool use" in instructions_text
@@ -154,12 +186,18 @@ async def test_that_adjusted_reasoning_does_not_override_tool_preamble_interval(
     context.state = ResponseState(step_notes="Ask for the missing airport before searching.")
 
     loop = _make_streaming_loop()
-    job = LoopJob(context=context, system_instructions="SYSTEM", step_instructions=None)
+    job = LoopJob(
+        context=context,
+        system_instructions="SYSTEM",
+        step_instructions=None,
+        preamble_config=PreambleConfiguration.encourage(),
+    )
 
     history, instructions_index = await loop._build_history(job)
     state = _LoopState(
         history=history,
         instructions_index=instructions_index,
+        preamble=_encouraged_preamble_state(),
     )
     loop._mark_user_visible_message_emitted(state)
 
@@ -178,7 +216,7 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
 
     await loop._surface_message_event(context, state, TextDelta(text="Let me check that for you."))
     assert state.message.buffer is not None
@@ -191,7 +229,7 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
 
     context.state.step_notes = "Ask for confirmation instead of calling the tool."
     assert state.preamble.last_user_visible_message_at is not None
-    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    state.preamble.last_user_visible_message_at -= DEFAULT_PREAMBLE_INTERVAL_SECONDS + 1
 
     # The retry's text starts a NEW message, not appended to the rejected preamble.
     await loop._surface_message_event(
@@ -218,7 +256,7 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
 
     events = [
         TextDelta(text="Let me search for direct flights. "),
@@ -242,7 +280,7 @@ async def test_that_streamed_tool_preamble_is_trimmed_to_one_sentence() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
 
     events = [
         TextDelta(text="I am checking the reservation status. "),
@@ -261,11 +299,55 @@ async def test_that_streamed_tool_preamble_is_trimmed_to_one_sentence() -> None:
     )
 
 
-async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_committed() -> None:
+async def test_that_default_preamble_configuration_passes_pre_tool_text_through_untrimmed() -> (
+    None
+):
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
     state = _LoopState()
+
+    events = [
+        TextDelta(text="I am checking the reservation status. "),
+        TextDelta(text="Let me check the next flight too."),
+        ToolCallStarted(id="call-1", name="get_reservation_details"),
+    ]
+    for event in events:
+        await loop._surface_message_event(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert len(message_events) == 1
+    assert cast(dict[str, Any], message_events[0].data)["message"] == (
+        "I am checking the reservation status. Let me check the next flight too."
+    )
+
+
+async def test_that_discourage_preamble_configuration_suppresses_pre_tool_text() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState(preamble=_ToolPreambleState(PreambleConfiguration.discourage()))
+
+    events = [
+        TextDelta(text="I am checking the reservation status."),
+        ToolCallStarted(id="call-1", name="get_reservation_details"),
+    ]
+    for event in events:
+        await loop._surface_message_event(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert message_events == []
+
+
+async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_committed() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState(preamble=_encouraged_preamble_state())
     loop._mark_user_visible_message_emitted(state)
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
@@ -299,10 +381,10 @@ async def test_that_streamed_tool_preambles_are_allowed_after_fifteen_seconds() 
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
-    state = _LoopState()
+    state = _LoopState(preamble=_encouraged_preamble_state())
     loop._mark_user_visible_message_emitted(state)
     assert state.preamble.last_user_visible_message_at is not None
-    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    state.preamble.last_user_visible_message_at -= DEFAULT_PREAMBLE_INTERVAL_SECONDS + 1
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(

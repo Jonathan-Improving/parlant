@@ -83,7 +83,11 @@ class StreamingLoop(BaseLoop):
                 # as its own bubble so post-tool text starts a fresh one (and the tool
                 # status follows the message). The buffer is what was actually shown.
                 buffered = state.message.buffer.getvalue() if state.message.buffer else ""
-                preamble = self._tool_preamble_text(buffered)
+                preamble = (
+                    self._tool_preamble_text(buffered)
+                    if self._should_trim_tool_preamble_text(state)
+                    else buffered
+                )
 
                 await state.message.handle.update(
                     MessageEventData(
@@ -136,7 +140,9 @@ class StreamingLoop(BaseLoop):
                     # Text arrived only in the final message (no deltas streamed) — emit
                     # it once as a complete, terminated message.
                     preamble = (
-                        self._tool_preamble_text(remaining) if result.needs_tools else remaining
+                        self._tool_preamble_text(remaining)
+                        if result.needs_tools and self._should_trim_tool_preamble_text(state)
+                        else remaining
                     )
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,

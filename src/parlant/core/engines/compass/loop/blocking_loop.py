@@ -57,7 +57,11 @@ class BlockingLoop(BaseLoop):
                     state.message.buffer = None
                     return
 
-                preamble = self._tool_preamble_text(buffered)
+                preamble = (
+                    self._tool_preamble_text(buffered)
+                    if self._should_trim_tool_preamble_text(state)
+                    else buffered
+                )
 
                 if preamble:
                     await context.session_event_emitter.emit_message_event(
@@ -92,7 +96,11 @@ class BlockingLoop(BaseLoop):
                     state.message.emitted_len = 0
                     return
 
-                preamble = self._tool_preamble_text(remaining) if result.needs_tools else remaining
+                preamble = (
+                    self._tool_preamble_text(remaining)
+                    if result.needs_tools and self._should_trim_tool_preamble_text(state)
+                    else remaining
+                )
 
                 if preamble:
                     await context.session_event_emitter.emit_message_event(

@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
+from parlant.core.engines.compass.preambles import PreambleConfiguration
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.nlp.common import ModelSize
 from parlant.core.nlp.react import (
@@ -32,6 +33,7 @@ class LoopJob:
     step_instructions: Callable[[EngineContext], Awaitable[str]] | None = None
     model_size: ModelSize = ModelSize.MEDIUM
     reasoning_config: ReasoningConfig | None = None
+    preamble_config: PreambleConfiguration = PreambleConfiguration.default()
 
 
 @dataclass(frozen=True)

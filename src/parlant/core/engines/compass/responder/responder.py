@@ -15,9 +15,10 @@
 from collections.abc import Awaitable, Callable
 from itertools import chain
 
-from parlant.core.agents import CompositionMode, Effort, MessageOutputMode
+from parlant.core.agents import AgentId, CompositionMode, Effort, MessageOutputMode
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.preambles import PreambleConfiguration
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.loop.loop import Loop, LoopJob
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
@@ -43,6 +44,13 @@ class Responder:
         self._meter = meter
         self._streaming_loop = streaming_loop
         self._blocking_loop = blocking_loop
+        self._preamble_configs: dict[AgentId, PreambleConfiguration] = {}
+
+    def set_preamble_config(self, agent_id: AgentId, config: PreambleConfiguration) -> None:
+        self._preamble_configs[agent_id] = config
+
+    def get_preamble_config(self, agent_id: AgentId) -> PreambleConfiguration | None:
+        return self._preamble_configs.get(agent_id)
 
     def _build_job(
         self,
@@ -55,6 +63,8 @@ class Responder:
             step_instructions=self._get_step_instructions(context, refresh_state),
             model_size=self._get_model_size(context),
             reasoning_config=self._get_reasoning_config(context),
+            preamble_config=self.get_preamble_config(context.agent.id)
+            or PreambleConfiguration.default(),
         )
 
     def _get_step_instructions(

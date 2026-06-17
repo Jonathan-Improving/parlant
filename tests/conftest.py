@@ -102,7 +102,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
     GuidelineRankSchema,
 )
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
-    GuidelineDistillationSchema,
+    HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
 from parlant.core.engines.alpha.guideline_matching.generic.guideline_previously_applied_actionable_batch import (
@@ -544,7 +544,7 @@ async def container(
             JourneyBacktrackCheckSchema,
             GuidelineRankSchema,
             LowEffortGuidelineDistillationSchema,
-            GuidelineDistillationSchema,
+            HighEffortGuidelineDistillationSchema,
         ):
             container[SchematicGenerator[generation_schema]] = await make_schematic_generator(  # type: ignore
                 container,
