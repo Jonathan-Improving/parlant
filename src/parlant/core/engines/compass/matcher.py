@@ -112,6 +112,12 @@ class Matcher:
     async def prefill(self, context: EngineContext) -> None:
         """Warm the ranker's and distiller's shared-prompt caches so their
         per-guideline fan-outs hit them. See :meth:`GuidelineRanker.prefill`."""
+        # The glossary is part of the cached shared prefix, so it must be loaded before
+        # warming — otherwise the warmed prefix omits it and the first real turn (which
+        # has loaded it) misses. At end-of-turn it's already loaded by `fill`, so skip.
+        if not context.state.glossary_terms:
+            await self._load_glossary(context)
+
         await safe_gather(
             self._guideline_ranker.prefill(context),
             self._guideline_distiller.prefill(context),
@@ -573,7 +579,11 @@ class Matcher:
         # (cached) system instructions. Loaded once here, not per response step.
         messages = [f"{m.source}: {m.content}" for m in context.interaction.messages]
         if not messages:
-            return  # nothing to rank against yet (e.g. the initialize-time warm-up)
+            # No conversation yet (the initialize-time warm-up). Rank against a neutral
+            # greeting so the glossary still loads — letting the warmed prefix include it
+            # and match the first real turn. With a glossary under the cap the full set
+            # is returned regardless of query, so it matches that turn exactly.
+            messages = ["User: Hello"]
 
         terms = await self._entity_queries.find_glossary_terms_for_context(
             context.agent.id,
