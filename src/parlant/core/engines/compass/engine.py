@@ -32,6 +32,7 @@ from parlant.core.engines.compass.compacter import Compacter
 from parlant.core.engines.compass.matcher import Matcher
 from parlant.core.engines.compass.responder import Responder
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
+from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.engines.types import Context, Engine, UtteranceRequest
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
@@ -49,6 +50,7 @@ class CompassEngine(Engine):
         matcher: Matcher,
         responder: Responder,
         compacter: Compacter,
+        variable_loader: VariableLoader,
         entity_queries: EntityQueries,
         hooks: EngineHooks,
     ) -> None:
@@ -59,6 +61,7 @@ class CompassEngine(Engine):
         self._matcher = matcher
         self._responder = responder
         self._compacter = compacter
+        self._variable_loader = variable_loader
 
         self._entity_queries = entity_queries
         self._hooks = hooks
@@ -79,6 +82,7 @@ class CompassEngine(Engine):
         )
 
         await self._load_usable_guidelines(engine_context)
+        await self._load_context_variables(engine_context)
 
         await safe_gather(
             self._matcher.prefill(engine_context),
@@ -114,6 +118,8 @@ class CompassEngine(Engine):
                     data=StatusEventData(status="processing", message="Thinking"),
                 ),
             )
+
+            await self._load_context_variables(engine_context)
 
             # Fire on_preparing before the (latency-heavy) guideline/tool loading
             # so preparation-time hooks — e.g. global retrievers — start fetching
@@ -286,6 +292,9 @@ class CompassEngine(Engine):
         context.state.usable_guidelines = list(
             await self._entity_queries.find_guidelines_for_context(context.agent.id, [])
         )
+
+    async def _load_context_variables(self, context: EngineContext) -> None:
+        context.state.context_variables = await self._variable_loader.load(context)
 
     async def _refresh_state(self, engine_context: EngineContext) -> None:
         # Called by the responder when (re)building the turn instructions

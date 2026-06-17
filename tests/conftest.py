@@ -196,6 +196,7 @@ from parlant.core.sessions import (
 )
 from parlant.core.engines.alpha.engine import AlphaEngine
 from parlant.core.engines.compass.engine import CompassEngine
+from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.glossary import GlossaryStore, GlossaryVectorStore
 from parlant.core.engines.alpha.guideline_matching.guideline_matcher import (
     GuidelineMatcher,
@@ -631,6 +632,7 @@ async def container(
 
         container[Engine] = Singleton(AlphaEngine)
         container[AlphaEngine] = Singleton(AlphaEngine)
+        container[VariableLoader] = Singleton(VariableLoader)
         container[CompassEngine] = Singleton(CompassEngine)
         container[EngineRegistry] = EngineRegistry(
             {

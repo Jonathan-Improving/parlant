@@ -233,6 +233,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_distiller import 
     LowEffortGuidelineDistillationSchema,
 )
 from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
+from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.guideline_tool_associations import (
     GuidelineToolAssociationDocumentStore,
     GuidelineToolAssociationStore,
@@ -719,6 +720,7 @@ async def setup_container() -> AsyncIterator[Container]:
     )
 
     _define_singleton(c, Engine, AlphaEngine)
+    _define_singleton(c, VariableLoader, VariableLoader)
     _define_singleton(c, CompassEngine, CompassEngine)
 
     _define_singleton_value(c, ApplicationContext, ApplicationContext(instance_id=generate_id()))
