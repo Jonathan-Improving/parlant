@@ -400,30 +400,12 @@ class Claude_Sonnet_3_5(AnthropicAISchematicGenerator[T]):
         return 200 * 1024
 
 
-class Claude_Sonnet_4(AnthropicAISchematicGenerator[T]):
+class Claude_Sonnet_4_6(AnthropicAISchematicGenerator[T]):
     def __init__(
         self, logger: Logger, tracer: Tracer, meter: Meter, health_reporter: HealthReporter
     ) -> None:
         super().__init__(
-            model_name="claude-sonnet-4-20250514",
-            logger=logger,
-            tracer=tracer,
-            meter=meter,
-            health_reporter=health_reporter,
-        )
-
-    @property
-    @override
-    def max_tokens(self) -> int:
-        return 200 * 1024
-
-
-class Claude_Opus_4_1(AnthropicAISchematicGenerator[T]):
-    def __init__(
-        self, logger: Logger, tracer: Tracer, meter: Meter, health_reporter: HealthReporter
-    ) -> None:
-        super().__init__(
-            model_name="claude-opus-4-1-20250805",
+            model_name="claude-sonnet-4-6",
             logger=logger,
             tracer=tracer,
             meter=meter,
@@ -1060,13 +1042,7 @@ Please set ANTHROPIC_API_KEY in your environment before running Parlant.
             return Claude_Haiku_4_5[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
-        if (
-            t == JourneyBacktrackNodeSelectionSchema
-            or t == DisambiguationGuidelineMatchesSchema
-            or t == CannedResponseSelectionSchema
-        ):
-            return Claude_Opus_4_1[t](self.logger, self._tracer, self._meter, self._health_reporter)  # type: ignore
-        return Claude_Sonnet_4[t](self.logger, self._tracer, self._meter, self._health_reporter)  # type: ignore
+        return Claude_Sonnet_4_6[t](self.logger, self._tracer, self._meter, self._health_reporter)  # type: ignore
 
     @override
     async def get_embedder(self, hints: EmbedderHints = {}) -> Embedder:
