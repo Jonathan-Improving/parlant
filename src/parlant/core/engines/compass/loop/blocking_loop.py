@@ -58,18 +58,20 @@ class BlockingLoop(BaseLoop):
                     state.message_buffer = None
                     return
 
-                if buffered:
+                preamble = self._tool_preamble_text(buffered)
+
+                if preamble:
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
                         data=MessageEventData(
-                            message=buffered,
+                            message=preamble,
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
                         ),
                     )
                     self._mark_user_visible_message_emitted(state)
-                    state.emitted_message_len += len(buffered)
+                    state.emitted_message_len += len(preamble)
                     state.allowed_tool_message_text_len = state.emitted_message_len
 
                 state.message_buffer = None
@@ -92,11 +94,13 @@ class BlockingLoop(BaseLoop):
                     state.emitted_message_len = 0
                     return
 
-                if remaining:
+                preamble = self._tool_preamble_text(remaining) if result.needs_tools else remaining
+
+                if preamble:
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
                         data=MessageEventData(
-                            message=remaining,
+                            message=preamble,
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
@@ -104,7 +108,7 @@ class BlockingLoop(BaseLoop):
                     )
                     self._mark_user_visible_message_emitted(state)
                     if result.needs_tools:
-                        state.allowed_tool_message_text_len = len(remaining)
+                        state.allowed_tool_message_text_len = len(preamble)
 
                 state.message_buffer = None
                 state.emitted_message_len = 0

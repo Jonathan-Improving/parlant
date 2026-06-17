@@ -116,7 +116,7 @@ async def test_that_reviewer_adjusted_reasoning_is_injected_even_without_step_in
     assert any("ask for confirmation first" in m.text for m in state.history)
 
 
-async def test_that_tool_preamble_note_is_injected_initially_and_after_ten_seconds() -> None:
+async def test_that_tool_preamble_note_is_injected_initially_and_after_fifteen_seconds() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
     context.state = ResponseState()
 
@@ -127,21 +127,26 @@ async def test_that_tool_preamble_note_is_injected_initially_and_after_ten_secon
     state = _LoopState(history=history, instructions_index=instructions_index)
 
     await loop._update_step_instructions(job, state)
-    assert any("Tool communication before tool use" in message.text for message in state.history)
+    instructions_text = "\n".join(message.text for message in state.history)
+    assert "Tool communication before tool use" in instructions_text
+    assert "exactly one short, natural sentence" in instructions_text
 
     loop._mark_user_visible_message_emitted(state)
+    assert state.last_user_visible_message_at is not None
+    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS - 1
     await loop._update_step_instructions(job, state)
-    assert not any(
-        "Tool communication before tool use" in message.text for message in state.history
-    )
+    instructions_text = "\n".join(message.text for message in state.history)
+    assert "Tool communication before tool use" in instructions_text
+    assert "Less than 15 seconds have passed since your last message" in instructions_text
+    assert "Run the next tool silently" in instructions_text
 
     assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    state.last_user_visible_message_at -= 2
     await loop._update_step_instructions(job, state)
 
     instructions_text = "\n".join(message.text for message in state.history)
     assert "Tool communication before tool use" in instructions_text
-    assert "More than 10 seconds have passed since your last message" in instructions_text
+    assert "More than 15 seconds have passed since your last message" in instructions_text
 
 
 async def test_that_adjusted_reasoning_does_not_override_tool_preamble_interval() -> None:
@@ -162,7 +167,8 @@ async def test_that_adjusted_reasoning_does_not_override_tool_preamble_interval(
 
     instructions_text = "\n".join(message.text for message in state.history)
     assert "Ask for the missing airport before searching." in instructions_text
-    assert "Tool communication before tool use" not in instructions_text
+    assert "Less than 15 seconds have passed since your last message" in instructions_text
+    assert "Run the next tool silently" in instructions_text
 
 
 async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message() -> None:
@@ -227,7 +233,30 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
         if e.kind == EventKind.MESSAGE
     ]
 
-    assert message_texts == ["Let me search for direct flights. "]
+    assert message_texts == ["Let me search for direct flights."]
+
+
+async def test_that_streamed_tool_preamble_is_trimmed_to_one_sentence() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState()
+
+    events = [
+        TextDelta(text="I am checking the reservation status. "),
+        TextDelta(text="Let me check the next flight too."),
+        ToolCallStarted(id="call-1", name="get_reservation_details"),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert len(message_events) == 1
+    assert cast(dict[str, Any], message_events[0].data)["message"] == (
+        "I am checking the reservation status."
+    )
 
 
 async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_committed() -> None:
@@ -264,7 +293,7 @@ async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_co
     assert state.history[-1].tool_calls == [tool_call]
 
 
-async def test_that_streamed_tool_preambles_are_allowed_after_ten_seconds() -> None:
+async def test_that_streamed_tool_preambles_are_allowed_after_fifteen_seconds() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()

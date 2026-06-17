@@ -83,18 +83,19 @@ class StreamingLoop(BaseLoop):
                 # as its own bubble so post-tool text starts a fresh one (and the tool
                 # status follows the message). The buffer is what was actually shown.
                 buffered = state.message_buffer.getvalue() if state.message_buffer else ""
+                preamble = self._tool_preamble_text(buffered)
 
                 await state.message_handle.update(
                     MessageEventData(
-                        message=buffered,
+                        message=preamble,
                         participant=Participant(
                             id=context.agent.id, display_name=context.agent.name
                         ),
-                        chunks=[*state.message_chunks, None],
+                        chunks=[preamble, None],
                     )
                 )
 
-                state.emitted_message_len += len(buffered)
+                state.emitted_message_len += len(preamble)
                 state.allowed_tool_message_text_len = state.emitted_message_len
                 state.message_buffer = None
                 state.message_chunks = []
@@ -143,19 +144,20 @@ class StreamingLoop(BaseLoop):
                 elif remaining:
                     # Text arrived only in the final message (no deltas streamed) — emit
                     # it once as a complete, terminated message.
+                    preamble = self._tool_preamble_text(remaining) if result.needs_tools else remaining
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
                         data=MessageEventData(
-                            message=remaining,
+                            message=preamble,
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
-                            chunks=[remaining, None],
+                            chunks=[preamble, None],
                         ),
                     )
                     self._mark_user_visible_message_emitted(state)
                     if result.needs_tools:
-                        state.allowed_tool_message_text_len = len(remaining)
+                        state.allowed_tool_message_text_len = len(preamble)
 
                     state.emitted_message_len = 0
 

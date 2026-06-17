@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from io import StringIO
 import json
+import re
 from typing import Any, Optional, cast
 
 from parlant.core.agents import Effort
@@ -173,7 +174,8 @@ class BaseLoop(Loop):
     # Retry a step on a transient ReactError, but only before any event has been
     # emitted (a stream can't be replayed mid-flight). Waits between attempts.
     _STREAM_RETRY_WAITS = (2.0, 8.0, 32.0)
-    _TOOL_PREAMBLE_INTERVAL_SECONDS = 10.0
+    _TOOL_PREAMBLE_INTERVAL_SECONDS = 15.0
+    _SENTENCE_END_PATTERN = re.compile(r"(?<=[.!?])(?:\s+|$)")
 
     def __init__(
         self,
@@ -396,6 +398,13 @@ class BaseLoop(Loop):
     def _mark_user_visible_message_emitted(self, state: _LoopState) -> None:
         state.user_visible_message_emitted = True
         state.last_user_visible_message_at = asyncio.get_event_loop().time()
+
+    def _tool_preamble_text(self, text: str) -> str:
+        match = self._SENTENCE_END_PATTERN.search(text)
+        if match is None:
+            return text
+
+        return text[: match.end()].strip()
 
     def _message_with_text_prefix(self, message: Message, prefix_len: int) -> Message:
         remaining = prefix_len
@@ -963,17 +972,28 @@ The following is notes and context about the current state of the conversation â
         if not state.user_visible_message_emitted:
             reviewer_notes.append(
                 "#### Tool communication before tool use\n\n"
-                "If you need to use *a new tool* for this step, you should first send one "
-                "short, natural sentence to the user about what you are checking "
-                "(Checking X; Let me do Y; Just a moment while I Z...). Keep it specific "
-                "to the current action, and avoid repeating wording from earlier messages."
+                "If you need to use *a new tool* for this step, you should first send exactly "
+                "one short, natural sentence to the user about what you are checking "
+                "(Checking X; Let me do Y; Just a moment while I Z...). Do not add a second "
+                '"I\'m checking" or "let me check" sentence in the same message. Keep it '
+                "specific to the current action, and avoid repeating wording from earlier "
+                "messages."
             )
         elif self._additional_preamble_is_needed(state):
             reviewer_notes.append(
                 "#### Tool communication before tool use\n\n"
-                "More than 10 seconds have passed since your last message to the user. "
+                f"More than {self._TOOL_PREAMBLE_INTERVAL_SECONDS:g} seconds have passed since your last message to the user. "
                 "If you need to use *a new tool* for this step, please update them on "
-                "what you're currently doing before running the next tool."
+                "what you're currently doing before running the next tool. Send exactly one "
+                "short sentence, and do not add another tool-progress sentence in the same "
+                "message."
+            )
+        else:
+            reviewer_notes.append(
+                "#### Tool communication before tool use\n\n"
+                f"Less than {self._TOOL_PREAMBLE_INTERVAL_SECONDS:g} seconds have passed since your last message to the user. "
+                "If you need to use another tool now, do not send another progress update "
+                "or preamble before the tool call. Run the next tool silently."
             )
 
         if state.force_message_note:

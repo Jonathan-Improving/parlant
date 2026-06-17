@@ -383,7 +383,31 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
         if e.kind == EventKind.MESSAGE
     ]
 
-    assert message_texts == ["Let me search for direct flights. "]
+    assert message_texts == ["Let me search for direct flights."]
+
+
+async def test_that_blocking_tool_preamble_is_trimmed_to_one_sentence() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+
+    loop = _make_blocking_loop()
+    state = _LoopState()
+
+    events = [
+        TextDelta(text="I am checking the reservation status. "),
+        TextDelta(text="Let me check the next flight too."),
+        ToolCallStarted(id="call-1", name="get_reservation_details"),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert len(message_events) == 1
+    assert cast(dict[str, Any], message_events[0].data)["message"] == (
+        "I am checking the reservation status."
+    )
 
 
 async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_committed() -> None:
@@ -421,7 +445,7 @@ async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_co
     assert state.history[-1].tool_calls == [tool_call]
 
 
-async def test_that_blocking_tool_preambles_are_allowed_after_ten_seconds() -> None:
+async def test_that_blocking_tool_preambles_are_allowed_after_fifteen_seconds() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
 
