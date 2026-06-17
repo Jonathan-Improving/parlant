@@ -110,18 +110,51 @@ class Matcher:
         await self._select_tools(context)
 
     async def prefill(self, context: EngineContext) -> None:
-        """Warm the ranker's and distiller's shared-prompt caches so their
-        per-guideline fan-outs hit them. See :meth:`GuidelineRanker.prefill`."""
+        """Warm only the matcher components that the current strategy can use."""
+        should_prefill_ranker, should_prefill_distiller = await self._get_prefill_targets(context)
+
+        if not should_prefill_ranker and not should_prefill_distiller:
+            return
+
         # The glossary is part of the cached shared prefix, so it must be loaded before
         # warming — otherwise the warmed prefix omits it and the first real turn (which
         # has loaded it) misses. At end-of-turn it's already loaded by `fill`, so skip.
         if not context.state.glossary_terms:
             await self._load_glossary(context)
 
-        await safe_gather(
-            self._guideline_ranker.prefill(context),
-            self._guideline_distiller.prefill(context),
-        )
+        prefill_tasks = []
+
+        if should_prefill_ranker:
+            prefill_tasks.append(self._guideline_ranker.prefill(context))
+
+        if should_prefill_distiller:
+            prefill_tasks.append(self._guideline_distiller.prefill(context))
+
+        await safe_gather(*prefill_tasks)
+
+    async def _get_prefill_targets(self, context: EngineContext) -> tuple[bool, bool]:
+        guidelines = [
+            g
+            for g in context.state.usable_guidelines
+            if g.criticality != Criticality.LOW and self._matcher_registry.get(g.id) is None
+        ]
+
+        if not guidelines:
+            return False, False
+
+        await self._load_strategy_signals(context, guidelines)
+
+        prefill_ranker = False
+        prefill_distiller = False
+
+        for guideline in guidelines:
+            match self._get_strategy(context, guideline):
+                case MatcherStrategy.RANK:
+                    prefill_ranker = True
+                case MatcherStrategy.DISTILL:
+                    prefill_distiller = True
+
+        return prefill_ranker, prefill_distiller
 
     # --- guideline matching ---
 
@@ -186,7 +219,11 @@ class Matcher:
                     case Criticality.MEDIUM:
                         strategy = MatcherStrategy.NONE
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.RANK
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if needs_distillation(guideline)
+                            else MatcherStrategy.RANK
+                        )
             case Effort.HIGH:
                 match guideline.criticality:
                     case Criticality.LOW:
@@ -198,7 +235,11 @@ class Matcher:
                             else MatcherStrategy.RANK
                         )
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.RANK
+                        strategy = (
+                            MatcherStrategy.DISTILL
+                            if needs_distillation(guideline)
+                            else MatcherStrategy.RANK
+                        )
             case Effort.MAX:
                 match guideline.criticality:
                     case Criticality.LOW:
@@ -399,12 +440,26 @@ class Matcher:
             GuidelineMatch(
                 guideline=dg.guideline,
                 rationale=dg.reasoning,
-                metadata={"distilled_action": dg.distilled_action} if dg.distilled_action else {},
+                metadata={
+                    "distilled_action": self._format_distilled_policy_note(
+                        dg.guideline, dg.distilled_action
+                    )
+                }
+                if dg.distilled_action
+                else {},
             )
             for dg in distilled.distilled_guidelines
             if dg.is_relevant
         ]
         return matches
+
+    def _format_distilled_policy_note(self, guideline: Guideline, distilled_action: str) -> str:
+        policy_title = guideline.title or "Untitled policy"
+        return (
+            f'According to policy "{policy_title}", {distilled_action.strip()}\n'
+            "Apply this only insofar as it remains compatible with the other active policies "
+            "and system instructions."
+        )
 
     async def _record(
         self,

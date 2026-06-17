@@ -916,7 +916,9 @@ The following are all the behavioral instructions and policies that govern your 
 
                     guideline += "\nIMPORTANT: Please go back and reason (internally) about the original content of this instruction to the letter before proceeding."
                 elif guidelines[p.guideline.id].criticality == Criticality.MEDIUM:
-                    if guidelines[p.guideline.id].content.description:
+                    if distilled_action := str(p.metadata.get("distilled_action", "")):
+                        guideline += f"\n{distilled_action.strip()}"
+                    elif description := guidelines[p.guideline.id].content.description:
                         guideline += "\nPlease review the original content of this instruction before proceeding."
 
                 # TODO: Consider whether we need the rationale.

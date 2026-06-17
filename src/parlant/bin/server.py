@@ -229,7 +229,8 @@ from parlant.core.engines.compass.compacter import CompactionSchema
 from parlant.core.engines.compass.engine import CompassEngine
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
-    GuidelineDistillSchema,
+    GuidelineDistillationSchema,
+    LowEffortGuidelineDistillationSchema,
 )
 from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
 from parlant.core.guideline_tool_associations import (
@@ -969,7 +970,8 @@ async def initialize_container(
         RelativeActionSchema,
         ReachableNodesEvaluationSchema,
         GuidelineRankSchema,
-        GuidelineDistillSchema,
+        LowEffortGuidelineDistillationSchema,
+        GuidelineDistillationSchema,
         LowEffortReview,
         HighEffortReview,
         CompactionSchema,

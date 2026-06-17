@@ -39,7 +39,8 @@ from parlant.adapters.nlp.common import record_llm_metrics
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.compacter import CompactionSchema
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
-    GuidelineDistillSchema,
+    GuidelineDistillationSchema,
+    LowEffortGuidelineDistillationSchema,
 )
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
@@ -1597,7 +1598,11 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
     async def get_schematic_generator(
         self, t: type[T], hints: SchematicGeneratorHints = {}
     ) -> GeminiSchematicGenerator[T]:
-        if t in (GuidelineRankSchema, GuidelineDistillSchema):
+        if t in (
+            GuidelineRankSchema,
+            LowEffortGuidelineDistillationSchema,
+            GuidelineDistillationSchema,
+        ):
             return Gemini_3_1_Flash_Lite[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )

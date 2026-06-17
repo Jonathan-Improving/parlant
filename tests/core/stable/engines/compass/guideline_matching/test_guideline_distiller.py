@@ -20,6 +20,7 @@ from typing import cast
 from lagom import Container
 from pytest import fixture
 
+from parlant.core.agents import Effort
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
 from parlant.core.engines.compass.response_state import ResponseState
 
@@ -2019,3 +2020,63 @@ def test_that_the_distiller_prompt_includes_the_agent_reasoning_but_keeps_it_out
     # Caching invariant: per-step reasoning must NOT enter the cached shared prefix.
     shared = distiller._build_shared_prompt(context, shots).build()  # type: ignore[arg-type]
     assert "refunded automatically" not in shared
+
+
+def test_that_the_distiller_keeps_the_current_turn_out_of_the_cached_prefix(
+    distiller: GuidelineDistiller,
+) -> None:
+    guideline = create_guideline(
+        condition="the customer wants a refund",
+        action="explain the refund process",
+    )
+    context = create_engine_context(
+        conversation=[
+            (EventSource.CUSTOMER, "I need help with my order"),
+            (EventSource.AI_AGENT, "Sure, what happened?"),
+            (EventSource.CUSTOMER, "Now I want a refund for the shoes"),
+        ],
+    )
+    context.state = ResponseState(agent_effort=Effort.LOW)
+
+    prompt = distiller._build_prompt(context, guideline, []).build()
+    shared = distiller._build_shared_prompt(context, []).build()
+
+    assert "# CURRENT TURN" in prompt
+    assert "Now I want a refund for the shoes" in prompt
+    assert "Sure, what happened?" in shared
+    assert "Now I want a refund for the shoes" not in shared
+
+
+def test_that_low_effort_distiller_prompt_uses_compact_output_schema(
+    distiller: GuidelineDistiller,
+) -> None:
+    guideline = create_guideline(
+        condition="the customer wants a refund",
+        action="explain the refund process",
+    )
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "I'd like a refund")])
+    context.state = ResponseState(agent_effort=Effort.LOW)
+
+    prompt = distiller._build_prompt(context, guideline, []).build()
+
+    assert '"distilled_action"' in prompt
+    assert '"is_relevant"' not in prompt
+    assert '"reasoning"' not in prompt
+    assert "set \"distilled_action\" to null" in prompt
+
+
+def test_that_high_effort_distiller_prompt_keeps_full_output_schema(
+    distiller: GuidelineDistiller,
+) -> None:
+    guideline = create_guideline(
+        condition="the customer wants a refund",
+        action="explain the refund process",
+    )
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "I'd like a refund")])
+    context.state = ResponseState(agent_effort=Effort.HIGH)
+
+    prompt = distiller._build_prompt(context, guideline, []).build()
+
+    assert '"distilled_action"' in prompt
+    assert '"is_relevant"' in prompt
+    assert '"reasoning"' in prompt

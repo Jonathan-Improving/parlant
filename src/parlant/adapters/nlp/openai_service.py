@@ -50,6 +50,10 @@ from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_next_
     JourneyNextStepSelectionSchema,
 )
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+    GuidelineDistillationSchema,
+    LowEffortGuidelineDistillationSchema,
+)
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
 from parlant.core.engines.alpha.tool_calling.single_tool_batch import (
@@ -1322,6 +1326,10 @@ Please set OPENAI_API_KEY in your environment before running Parlant.
                     JourneyNextStepSelectionSchema: GPT_4_1[JourneyNextStepSelectionSchema],
                     JourneyBacktrackCheckSchema: GPT_4_1_Mini[JourneyBacktrackCheckSchema],
                     GuidelineRankSchema: GPT_5_4_Nano[GuidelineRankSchema],
+                    LowEffortGuidelineDistillationSchema: GPT_5_4_Nano[
+                        LowEffortGuidelineDistillationSchema
+                    ],
+                    GuidelineDistillationSchema: GPT_5_4_Nano[GuidelineDistillationSchema],
                     LowEffortReview: GPT_5_4_Mini[LowEffortReview],
                     HighEffortReview: GPT_5_4_Mini[HighEffortReview],
                 }.get(t, GPT_4o_24_08_06[t])(  # type: ignore

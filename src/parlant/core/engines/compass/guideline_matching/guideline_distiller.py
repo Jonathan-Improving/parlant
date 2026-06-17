@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
+from parlant.core.agents import Effort
 from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
 from parlant.core.engines.alpha.prompt_builder import (
     BuiltInSection,
@@ -59,9 +60,13 @@ class GuidelineDistillationResult:
     generation_info: GenerationInfo | None
 
 
-class GuidelineDistillSchema(DefaultBaseModel):
+class GuidelineDistillationSchema(DefaultBaseModel):
     reasoning: str
     is_relevant: bool
+    distilled_action: Optional[str] = None
+
+
+class LowEffortGuidelineDistillationSchema(DefaultBaseModel):
     distilled_action: Optional[str] = None
 
 
@@ -70,7 +75,7 @@ class GuidelineDistillationShot(Shot):
     interaction_events: Sequence[Event]
     # The distiller evaluates a single guideline per prompt, so each shot carries one.
     guideline: GuidelineContent
-    expected_result: GuidelineDistillSchema
+    expected_result: GuidelineDistillationSchema
 
 
 class GuidelineDistiller:
@@ -87,16 +92,27 @@ class GuidelineDistiller:
     GUIDELINE_CACHE_BREAKPOINT = "- Guideline: ###"
     REASONING_CACHE_BREAKPOINT = "AGENT'S REASONING SO FAR THIS TURN"
     STAGED_EVENTS_CACHE_BREAKPOINT = "STAGED EVENTS"
+    CURRENT_TURN_CACHE_BREAKPOINT = "# CURRENT TURN"
+
+    # Message sources counted as "the agent's reply" — the boundary the cached
+    # interaction history is truncated at (everything after is this turn's tail).
+    _AGENT_MESSAGE_SOURCES = (
+        EventSource.AI_AGENT,
+        EventSource.HUMAN_AGENT_ON_BEHALF_OF_AI_AGENT,
+        EventSource.HUMAN_AGENT,
+    )
 
     def __init__(
         self,
         logger: Logger,
         tracer: Tracer,
-        schematic_generator: SchematicGenerator[GuidelineDistillSchema],
+        low_effort_schematic_generator: SchematicGenerator[LowEffortGuidelineDistillationSchema],
+        high_effort_schematic_generator: SchematicGenerator[GuidelineDistillationSchema],
     ) -> None:
         self._logger = logger
         self._tracer = tracer
-        self._schematic_generator = schematic_generator
+        self._low_effort_schematic_generator = low_effort_schematic_generator
+        self._high_effort_schematic_generator = high_effort_schematic_generator
 
     async def distill(
         self,
@@ -129,28 +145,63 @@ class GuidelineDistiller:
         context: EngineContext,
         guideline: Guideline,
     ) -> tuple[DistilledGuideline, GenerationInfo]:
-        prompt = self._build_prompt(context, guideline, shots=await self.shots())
+        high_effort = self._should_use_high_effort_schema(context)
+        prompt = self._build_prompt(
+            context,
+            guideline,
+            shots=await self.shots(),
+            high_effort=high_effort,
+        )
 
-        inference = await self._schematic_generator.generate(
-            prompt=prompt,
-            hints={
-                "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
-                "cache": {
-                    "key": self._cache_key(context),
-                    "breakpoint": self._cache_breakpoint(context),
-                },
+        hints = {
+            "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
+            "cache": {
+                "key": f"{self._cache_key(context)}.{'high' if high_effort else 'low'}",
+                "breakpoint": self._cache_breakpoint(context),
             },
+        }
+
+        if high_effort:
+            inference = await self._high_effort_schematic_generator.generate(
+                prompt=prompt,
+                hints=hints,
+            )
+
+            return (
+                DistilledGuideline(
+                    guideline=guideline,
+                    reasoning=inference.content.reasoning,
+                    is_relevant=inference.content.is_relevant,
+                    distilled_action=inference.content.distilled_action,
+                ),
+                inference.info,
+            )
+
+        inference = await self._low_effort_schematic_generator.generate(
+            prompt=prompt,
+            hints=hints,
+        )
+
+        distilled_action = (
+            inference.content.distilled_action.strip()
+            if inference.content.distilled_action
+            else None
         )
 
         return (
             DistilledGuideline(
                 guideline=guideline,
-                reasoning=inference.content.reasoning,
-                is_relevant=inference.content.is_relevant,
-                distilled_action=inference.content.distilled_action,
+                reasoning="Relevant. The distiller returned a next-step action."
+                if distilled_action
+                else "Not relevant. The distiller returned no next-step action.",
+                is_relevant=distilled_action is not None,
+                distilled_action=distilled_action,
             ),
             inference.info,
         )
+
+    def _should_use_high_effort_schema(self, context: EngineContext) -> bool:
+        return context.state.dynamic_effort_level in (Effort.HIGH, Effort.MAX)
 
     def _cache_key(self, context: EngineContext) -> str:
         # Namespace the provider cache per session AND component, so components
@@ -158,11 +209,7 @@ class GuidelineDistiller:
         return f"{context.session.id}.guideline-distiller"
 
     def _cache_breakpoint(self, context: EngineContext) -> str:
-        if context.state.reasoning_steps:
-            return self.REASONING_CACHE_BREAKPOINT
-        if context.state.tool_events:
-            return self.STAGED_EVENTS_CACHE_BREAKPOINT
-        return self.GUIDELINE_CACHE_BREAKPOINT
+        return self.CURRENT_TURN_CACHE_BREAKPOINT
 
     async def prefill(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the distiller's shared prompt prefix, so
@@ -171,17 +218,24 @@ class GuidelineDistiller:
         :meth:`GuidelineRanker.prefill`."""
         with self._tracer.span("guideline.distill-prefill"):
             try:
+                high_effort = self._should_use_high_effort_schema(context)
                 prompt = self._build_prompt(
                     context,
                     guideline=self._cache_prefill_guideline(),
                     shots=await self.shots(),
+                    high_effort=high_effort,
                 )
-                inference = await self._schematic_generator.generate(
+                generator = (
+                    self._high_effort_schematic_generator
+                    if high_effort
+                    else self._low_effort_schematic_generator
+                )
+                inference = await generator.generate(
                     prompt=prompt,
                     hints={
                         "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
                         "cache": {
-                            "key": self._cache_key(context),
+                            "key": f"{self._cache_key(context)}.{'high' if high_effort else 'low'}",
                             "breakpoint": self._cache_breakpoint(context),
                         },
                     },
@@ -209,12 +263,23 @@ class GuidelineDistiller:
             criticality=Criticality.LOW,
         )
 
-    def _format_shots(self, shots: Sequence[GuidelineDistillationShot]) -> str:
+    def _format_shots(
+        self,
+        shots: Sequence[GuidelineDistillationShot],
+        *,
+        high_effort: bool,
+    ) -> str:
         return "\n".join(
-            f"Example #{i}: ###\n{self._format_shot(shot)}" for i, shot in enumerate(shots, start=1)
+            f"Example #{i}: ###\n{self._format_shot(shot, high_effort=high_effort)}"
+            for i, shot in enumerate(shots, start=1)
         )
 
-    def _format_shot(self, shot: GuidelineDistillationShot) -> str:
+    def _format_shot(
+        self,
+        shot: GuidelineDistillationShot,
+        *,
+        high_effort: bool,
+    ) -> str:
         def adapt_event(e: Event) -> JSONSerializable:
             source_map: dict[EventSource, str] = {
                 EventSource.CUSTOMER: "user",
@@ -245,9 +310,7 @@ class GuidelineDistiller:
 
 """
 
-        expected_result = shot.expected_result.model_dump(mode="json")
-        if expected_result.get("distilled_action") is None:
-            expected_result.pop("distilled_action", None)
+        expected_result = self._format_expected_result(shot.expected_result, high_effort)
 
         formatted_shot += f"""
 - **Expected Result**:
@@ -258,16 +321,73 @@ class GuidelineDistiller:
 
         return formatted_shot
 
+    def _format_expected_result(
+        self,
+        expected_result: GuidelineDistillationSchema,
+        high_effort: bool,
+    ) -> dict[str, JSONSerializable]:
+        if high_effort:
+            result = expected_result.model_dump(mode="json")
+            if result.get("distilled_action") is None:
+                result.pop("distilled_action", None)
+            return result
+
+        return {"distilled_action": expected_result.distilled_action}
+
+    def _applicability_output_instruction(self, high_effort: bool) -> str:
+        if high_effort:
+            return """\
+Record your applicability decision in the "is_relevant" field. "is_relevant" means this guideline contributes an actual instruction to the next response, so decide as follows:
+- If the guideline's condition does not apply, set "is_relevant" to false.
+- If the condition applies but there is genuinely nothing left to do right now - for example its action was already fully carried out earlier and has not arisen again for a new reason - also set "is_relevant" to false. There is no "relevant but nothing to do" state: if the guideline has nothing to contribute to the next response, it is not relevant.
+- Only when the condition applies AND there is something concrete to do now, set "is_relevant" to true - and then you MUST provide a non-empty "distilled_action".
+Before concluding that a step was already carried out, confirm it actually happened earlier in the conversation; if you are not sure it was completed, treat it as still needing doing. When "is_relevant" is false, omit "distilled_action" entirely."""
+
+        return """\
+Represent applicability using only the "distilled_action" field:
+- If the guideline's condition does not apply, set "distilled_action" to null.
+- If the condition applies but there is genuinely nothing left to do right now - for example its action was already fully carried out earlier and has not arisen again for a new reason - also set "distilled_action" to null. There is no "relevant but nothing to do" state: if the guideline has nothing to contribute to the next response, return null.
+- Only when the condition applies AND there is something concrete to do now, provide a non-empty "distilled_action".
+Before concluding that a step was already carried out, confirm it actually happened earlier in the conversation; if you are not sure it was completed, treat it as still needing doing."""
+
+    def _already_completed_instruction(self, high_effort: bool) -> str:
+        if high_effort:
+            return (
+                "If it was already fully carried out and its condition has not arisen again "
+                "for a new reason, there is nothing left to do, so the guideline is not "
+                'relevant (set "is_relevant" to false).'
+            )
+
+        return (
+            "If it was already fully carried out and its condition has not arisen again "
+            'for a new reason, there is nothing left to do, so set "distilled_action" to null.'
+        )
+
     def _build_prompt(
         self,
         context: EngineContext,
         guideline: Guideline,
         shots: Sequence[GuidelineDistillationShot],
+        high_effort: bool | None = None,
     ) -> PromptBuilder:
+        if high_effort is None:
+            high_effort = self._should_use_high_effort_schema(context)
+
         # The cross-turn/within-turn-stable shared prefix, then the turn-varying
         # tail. The cache breakpoint points at the first existing tail section
         # that will be present for this context.
-        builder = self._build_shared_prompt(context, shots)
+        builder = self._build_shared_prompt(context, shots, high_effort=high_effort)
+
+        _, trailing_events = self._split_interaction_at_last_agent_reply(context.interaction.events)
+        builder.add_section(
+            name="guideline-distiller-current-turn",
+            template="""
+# CURRENT TURN
+{current_turn_text}
+""",
+            props={"current_turn_text": self._format_current_turn(builder, trailing_events)},
+            status=SectionStatus.ACTIVE,
+        )
 
         # Per-step reasoning goes in the tail (not the cached shared prefix) so the
         # cache stays valid while the matching tracks the agent's evolving reasoning.
@@ -301,11 +421,15 @@ class GuidelineDistiller:
         self,
         context: EngineContext,
         shots: Sequence[GuidelineDistillationShot],
+        high_effort: bool | None = None,
     ) -> PromptBuilder:
         """The shared head of the distiller prompt (instructions, shots, identities,
         output format, and the per-turn context) — everything except the specific
         guideline. Stays byte-identical across the per-guideline fan-out, so it's the
         prefix `prefill` warms."""
+        if high_effort is None:
+            high_effort = self._should_use_high_effort_schema(context)
+
         builder = PromptBuilder()
 
         builder.add_section(
@@ -337,11 +461,7 @@ A guideline applies in either of these cases:
 2. Its condition applied earlier and the agent is still in the middle of carrying out the action. Many actions span several steps, so a guideline remains applicable until its action has been fully carried out. For example, for the action "when the customer wants a drink, ask which drink and then which size", if the customer asked for a drink and the agent has only asked and received an answer for the first question, the guideline still applies - the agent has yet to ask about the size.
 
 Evaluate the actual meaning of the condition, not just keyword matches, and take the full context into account - including context variables, glossary terms, capabilities, and tool results. Do not consider the guideline applicable based solely on earlier parts of the conversation if the topic has since shifted and its action is not still in progress, even if the previous topic remains unresolved. If the conversation moves from a broader issue to a related sub-issue, the guideline remains applicable as long as it is relevant to that sub-issue; once the discussion has clearly moved on to an entirely different topic, it no longer applies.
-Record your applicability decision in the "is_relevant" field. "is_relevant" means this guideline contributes an actual instruction to the next response, so decide as follows:
-- If the guideline's condition does not apply, set "is_relevant" to false.
-- If the condition applies but there is genuinely nothing left to do right now - for example its action was already fully carried out earlier and has not arisen again for a new reason - also set "is_relevant" to false. There is no "relevant but nothing to do" state: if the guideline has nothing to contribute to the next response, it is not relevant.
-- Only when the condition applies AND there is something concrete to do now, set "is_relevant" to true - and then you MUST provide a non-empty "distilled_action".
-Before concluding that a step was already carried out, confirm it actually happened earlier in the conversation; if you are not sure it was completed, treat it as still needing doing. When "is_relevant" is false, omit "distilled_action" entirely.
+{applicability_output_instruction}
 
 Distilling the guideline:
 If the guideline applies, work out which of its guidance is relevant right now. A guideline is often broad: its action and detailed instructions may lay out an ordered sequence of steps, a set of rules or constraints, plain information, or be phrased generally enough that it could be applied in more than one way - and may cover several different situations at once. Distill it down to only what bears on the current state of the conversation. Two shapes come up most:
@@ -355,7 +475,7 @@ Be especially careful with constraints, prohibitions, and limitations (rules of 
 
 Internal verification instructions ("make sure the rules apply before doing X") tell YOU what to check before acting; they are not, by themselves, something to recite to the customer.
 
-Some of the guidance may already have been carried out, in full or in part, earlier in the conversation. In that case, output only the part that still needs to be carried out now. If it was already fully carried out and its condition has not arisen again for a new reason, there is nothing left to do, so the guideline is not relevant (set "is_relevant" to false). If the condition has arisen again for a new reason (a new or subtly different context), the guidance should be applied again for that new occurrence. Be conservative about repeating guidance that delivers static, one-time information (e.g. "send our address"): only repeat it if the condition genuinely arose again.
+Some of the guidance may already have been carried out, in full or in part, earlier in the conversation. In that case, output only the part that still needs to be carried out now. {already_completed_instruction} If the condition has arisen again for a new reason (a new or subtly different context), the guidance should be applied again for that new occurrence. Be conservative about repeating guidance that delivers static, one-time information (e.g. "send our address"): only repeat it if the condition genuinely arose again.
 
 If a flow has returned to an earlier stage (e.g. the customer corrects something they said earlier), don't just take the step that literally follows the changed point. Skip any later steps whose information you already have and that is still valid, and jump forward to the next step that genuinely still needs doing.
 When the correction changes the target entity, account, person, product, or subject of the flow, carry that changed target explicitly into the distilled action. Do not collapse it to only an identifier if the conversation supplies a meaningful label or relationship for it. Include both when both are known; for example, prefer "ask for the email address for the husband's account 123655" over "ask for the email address for account 123655".
@@ -369,7 +489,14 @@ Carry through every concrete operative detail the guideline specifies for what y
 
 The exact format of your response will be provided later in this prompt.
 """,
-            props={},
+            props={
+                "applicability_output_instruction": self._applicability_output_instruction(
+                    high_effort
+                ),
+                "already_completed_instruction": self._already_completed_instruction(
+                    high_effort
+                ),
+            },
         )
         builder.add_section(
             name="guideline-distiller-examples",
@@ -379,7 +506,7 @@ Examples of Guideline Distillations:
 {formatted_shots}
 """,
             props={
-                "formatted_shots": self._format_shots(shots),
+                "formatted_shots": self._format_shots(shots, high_effort=high_effort),
                 "shots": shots,
             },
         )
@@ -398,7 +525,7 @@ OUTPUT FORMAT
 ```
 """,
             props={
-                "result_structure_text": self._format_output(),
+                "result_structure_text": self._format_output(high_effort),
             },
         )
 
@@ -407,13 +534,59 @@ OUTPUT FORMAT
         builder.add_capabilities_for_guideline_matching(context.state.capabilities)
         if context.state.session_summary:
             builder.add_session_summary(context.state.session_summary)
+        cached_events, _ = self._split_interaction_at_last_agent_reply(context.interaction.events)
         builder.add_interaction_history(
-            context.interaction.events, format=EventAdaptationFormat.ROLE_SCRIPT
+            cached_events,
+            format=EventAdaptationFormat.ROLE_SCRIPT,
         )
 
         return builder
 
-    def _format_output(self) -> str:
+    def _split_interaction_at_last_agent_reply(
+        self,
+        events: Sequence[Event],
+    ) -> tuple[Sequence[Event], Sequence[Event]]:
+        """Split the interaction into the cross-turn-stable head (through the agent's
+        last reply) and the per-turn tail (the customer message(s) that arrived after
+        it). Caching only the head lets prefix warming at the end of a turn be reused by
+        the next turn's matching, which merely appends the new message."""
+        cutoff = 0
+        for index, event in enumerate(events):
+            if event.kind == EventKind.MESSAGE and event.source in self._AGENT_MESSAGE_SOURCES:
+                cutoff = index + 1
+        return events[:cutoff], events[cutoff:]
+
+    def _format_current_turn(
+        self,
+        builder: PromptBuilder,
+        events: Sequence[Event],
+    ) -> str:
+        rendered = [
+            builder.adapt_event(event, format=EventAdaptationFormat.ROLE_SCRIPT)
+            for event in events
+            if event.kind != EventKind.STATUS
+        ]
+        if not rendered:
+            return "(No new customer message has arrived yet.)"
+        return (
+            "The following continues the interaction history above — the customer's "
+            "most recent message(s):\n" + "\n".join(rendered)
+        )
+
+    def _format_output(self, high_effort: bool = True) -> str:
+        if not high_effort:
+            return json.dumps(
+                {
+                    "distilled_action": (
+                        "<A standalone, self-contained statement of the guidance relevant "
+                        "to the next response. Return null if the guideline's condition "
+                        "does not apply, or if it applies but has no concrete instruction "
+                        "left to contribute to the next response.>"
+                    )
+                },
+                indent=4,
+            )
+
         result: dict[str, JSONSerializable] = {
             "reasoning": (
                 "<A brief explanation of whether the guideline currently applies and, "
@@ -520,7 +693,7 @@ example_1_guideline = GuidelineContent(
     ),
 )
 
-example_1_expected = GuidelineDistillSchema(
+example_1_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer wants to book a flight and has already provided the source and "
         "destination airports, so the journey is in progress. The next step in the action "
@@ -556,7 +729,7 @@ example_2_guideline = GuidelineContent(
     action="Provide links or suggestions for flight aggregators and hotel booking platforms.",
 )
 
-example_2_expected = GuidelineDistillSchema(
+example_2_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer is asking about visas and travel documents, not about booking flights "
         "or accommodation, so the condition does not apply to the current state of the "
@@ -581,7 +754,7 @@ example_3_guideline = GuidelineContent(
     action="provide the price using the 'check_stock_price' tool",
 )
 
-example_3_expected = GuidelineDistillSchema(
+example_3_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer is asking about the value of the S&P 500, so the guideline applies. "
         "Its action is a single concrete instruction, so it should be taken as is."
@@ -615,7 +788,7 @@ example_4_guideline = GuidelineContent(
     action="Ask for their account ID to verify their identity",
 )
 
-example_4_expected = GuidelineDistillSchema(
+example_4_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer is still asking for account-related help, but they already provided "
         "their account ID earlier and it remains valid for this request, so the action has "
@@ -653,7 +826,7 @@ example_5_guideline = GuidelineContent(
     action="Ask for their preferred activities and recommend accordingly",
 )
 
-example_5_expected = GuidelineDistillSchema(
+example_5_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer raised a new trip — a winter trip to Europe — so the condition arose "
         "again for a new reason and the action should be reapplied. Their preferred "
@@ -691,7 +864,7 @@ example_6_guideline = GuidelineContent(
     ),
 )
 
-example_6_expected = GuidelineDistillSchema(
+example_6_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer changed the date, returning to an earlier step of the action. The home "
         "address they already gave is still valid, so there's no need to ask for it again. The "
@@ -725,7 +898,7 @@ example_7_guideline = GuidelineContent(
     ),
 )
 
-example_7_expected = GuidelineDistillSchema(
+example_7_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer wants to downgrade and asks whether they can switch again later this "
         "month, so the guideline applies. The downgrade-timing rule and the once-per-cycle "
@@ -762,7 +935,7 @@ example_8_guideline = GuidelineContent(
     ),
 )
 
-example_8_expected = GuidelineDistillSchema(
+example_8_expected = GuidelineDistillationSchema(
     reasoning=(
         "The customer wants to book catering for 8 guests, so the deposit rule applies. The "
         "deposit is $25 per guest, which for 8 guests is $200 - that amount must be stated, "
