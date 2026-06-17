@@ -874,7 +874,10 @@ The following are all the behavioral instructions and policies that govern your 
         all_matches = [
             match
             for match in chain(ordinary, tool_enabled)
-            if guidelines[match.guideline.id].content.action
+            if (
+                guidelines[match.guideline.id].content.action
+                or match.metadata.get("distilled_action")
+            )
             and not match.guideline.criticality == Criticality.LOW
         ]
         # Titled instructions first, preserving the original order within each group.
@@ -893,14 +896,19 @@ The following are all the behavioral instructions and policies that govern your 
                 # If the guideline is short and only has a condition, and is only relevant due to tool availability, we can assume it's meant to be a short instruction related to the tool, and we can save space in the prompt by putting it in the tool description section instead of the guideline list section.
                 continue
 
-            if guidelines[p.guideline.id].content.action:
+            if guidelines[p.guideline.id].content.action or p.metadata.get("distilled_action"):
                 if guidelines[p.guideline.id].title:
                     guideline = (
                         f'### Review the instructions under "{guidelines[p.guideline.id].title}"'
                     )
                 else:
-                    if guidelines[p.guideline.id].content.condition:
+                    if (
+                        guidelines[p.guideline.id].content.condition
+                        and guidelines[p.guideline.id].content.action
+                    ):
                         guideline = f"### Remember, when {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
+                    elif guidelines[p.guideline.id].content.condition:
+                        guideline = f"### Remember, when {guidelines[p.guideline.id].content.condition}"
                     else:
                         guideline = f"### Remember: {guidelines[p.guideline.id].content.action}"
 
@@ -1044,7 +1052,7 @@ The following are "principles" - these are instructions that are considered less
 
             tool_lines.append(line)
 
-        preface = """\
+        preface = """
 ## TOOL REFRESHER
 
 IMPORTANT: When running tools, consider *very carefully* whether it is required to issue **multiple calls to the same tool** - for example, if there are *different contexts* and arguments that need to be managed across different calls. This is especially important to *respect user intent when handling sensitive operations across multiple contexts* simultaneously.

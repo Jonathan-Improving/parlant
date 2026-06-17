@@ -592,6 +592,7 @@ class _ReasoningEventProcessor:
                             message=state.reasoning_buffer.getvalue(),
                             chunks=state.reasoning_chunks,
                         ),
+                        metadata={"reasoning": True},
                     )
                 else:  # Subsequent reasoning chunk
                     assert state.reasoning_buffer is not None

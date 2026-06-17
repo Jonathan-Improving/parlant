@@ -278,17 +278,18 @@ Finally, remember that this is a LIVE CONVERSATION, not email. Be simple, concis
             on_build=lambda prompt: self._logger.trace(f"Responder turn instructions:\n{prompt}")
         )
 
-        builder.add_matched_guidelines(
-            context.state.ordinary_guideline_matches,
-            context.state.tool_enabled_guideline_matches,
-            guidelines,
-        )
         builder.add_tool_descriptions(
             {
                 context.state.tool_ids_by_name[tool.name]: tool
                 for tool in context.state.matched_tools
             },
             context.state.tool_enabled_guideline_matches,
+        )
+
+        builder.add_matched_guidelines(
+            context.state.ordinary_guideline_matches,
+            context.state.tool_enabled_guideline_matches,
+            guidelines,
         )
 
         builder.add_section(

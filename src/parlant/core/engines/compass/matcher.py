@@ -369,7 +369,7 @@ class Matcher:
         ranking_results = StringIO()
 
         if ranked.generation_info:
-            ranking_results.write(f"Usage: {ranked.generation_info}\n")
+            ranking_results.write(f"Usage: {ranked.generation_info}\n\n")
 
         if ranked.ranked_guidelines:
             for idx, rank_result in enumerate(ranked.ranked_guidelines, start=1):
@@ -391,7 +391,7 @@ class Matcher:
         distillation_results = StringIO()
 
         if distilled.generation_info:
-            distillation_results.write(f"Usage: {distilled.generation_info}\n")
+            distillation_results.write(f"Usage: {distilled.generation_info}\n\n")
 
         if distilled.distilled_guidelines:
             for idx, distill_result in enumerate(distilled.distilled_guidelines, start=1):

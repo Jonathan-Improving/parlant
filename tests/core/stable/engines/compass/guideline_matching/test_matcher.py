@@ -18,6 +18,8 @@ import pytest
 
 from parlant.core.agents import Effort
 from parlant.core.common import Criticality
+from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
+from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.matcher import Matcher
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.sessions import EventSource
@@ -87,6 +89,29 @@ def test_that_distilled_policy_notes_have_a_fallback_title() -> None:
     note = matcher._format_distilled_policy_note(guideline, "ask for the order ID")
 
     assert note.startswith('According to policy "Untitled policy", ask for the order ID')
+
+
+def test_that_description_only_distilled_matches_are_rendered_as_instruction_reminders() -> None:
+    guideline = replace(
+        create_guideline(
+            condition="booking a flight",
+            action=None,
+            description="Collect booking details in order.",
+        ),
+        criticality=Criticality.HIGH,
+        title="Book flight",
+    )
+    match = GuidelineMatch(
+        guideline=guideline,
+        rationale="Relevant.",
+        metadata={"distilled_action": "Ask the user for the trip type."},
+    )
+
+    prompt = PromptBuilder().add_matched_guidelines([match], {}, {guideline.id: guideline}).build()
+
+    assert '### Review the instructions under "Book flight"' in prompt
+    assert "Ask the user for the trip type." in prompt
+    assert "IMPORTANT: Please go back and reason" in prompt
 
 
 @pytest.mark.asyncio
