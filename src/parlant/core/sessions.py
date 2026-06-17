@@ -79,10 +79,10 @@ EventId = NewType("EventId", str)
 class EventSource(Enum):
     """The source of an event in a session."""
 
-    CUSTOMER = "customer"
+    CUSTOMER = "user"
     """Represents an event from the customer, such as a message or action."""
 
-    CUSTOMER_UI = "customer_ui"
+    CUSTOMER_UI = "user_ui"
     """Represents an event from the customer UI, such as a page navigation or button click."""
 
     HUMAN_AGENT = "human_agent"
