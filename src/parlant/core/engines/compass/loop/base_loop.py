@@ -36,6 +36,7 @@ from parlant.core.meter import Meter
 from parlant.core.nlp.common import ModelSize
 from parlant.core.nlp.react import (
     Message,
+    Part,
     ReactError,
     ReactGenerator,
     ReasoningDelta,
@@ -408,7 +409,7 @@ class BaseLoop(Loop):
 
     def _message_with_text_prefix(self, message: Message, prefix_len: int) -> Message:
         remaining = prefix_len
-        parts = []
+        parts: list[Part] = []
 
         for part in message.parts:
             if isinstance(part, TextPart):

@@ -144,7 +144,9 @@ class StreamingLoop(BaseLoop):
                 elif remaining:
                     # Text arrived only in the final message (no deltas streamed) — emit
                     # it once as a complete, terminated message.
-                    preamble = self._tool_preamble_text(remaining) if result.needs_tools else remaining
+                    preamble = (
+                        self._tool_preamble_text(remaining) if result.needs_tools else remaining
+                    )
                     await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
                         data=MessageEventData(

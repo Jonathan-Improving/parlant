@@ -140,5 +140,9 @@ def test_that_guideline_match_properties_are_computed_once_until_invalidated() -
 
     state.invalidate_cached_properties()
 
-    assert state.dynamic_effort_level == Effort.HIGH
+    # Read into a freshly-typed local: the asserts above narrow
+    # `dynamic_effort_level` to Literal[Effort.LOW], and mypy can't see that
+    # invalidation recomputes it to HIGH.
+    recomputed_effort: Effort = state.dynamic_effort_level
+    assert recomputed_effort == Effort.HIGH
     assert state.has_matched_high_criticality_guidelines

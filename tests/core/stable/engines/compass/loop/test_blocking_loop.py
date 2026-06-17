@@ -117,9 +117,7 @@ class _EmptyThenMessageReact:
                     message=Message(
                         role=Role.ASSISTANT,
                         parts=[
-                            TextPart(
-                                text="I'm sorry, I'm not able to help with that right now."
-                            )
+                            TextPart(text="I'm sorry, I'm not able to help with that right now.")
                         ],
                     ),
                     finish_reason=FinishReason.STOP,
@@ -172,9 +170,7 @@ class _RejectedToolsThenMessageReact:
                     message=Message(
                         role=Role.ASSISTANT,
                         parts=[
-                            TextPart(
-                                text="I'm sorry, I'm not able to help with that right now."
-                            )
+                            TextPart(text="I'm sorry, I'm not able to help with that right now.")
                         ],
                     ),
                     finish_reason=FinishReason.STOP,
@@ -305,8 +301,7 @@ async def test_that_max_engine_iterations_forces_a_final_message_with_tools_disa
     assert react.calls[1]["tool_choice"] == "none"
     assert react.calls[1]["tools"] == []
     assert any(
-        "You must now explain to the user" in message.text
-        for message in react.calls[1]["history"]
+        "You must now explain to the user" in message.text for message in react.calls[1]["history"]
     )
 
     emitter = cast(EventBuffer, context.session_event_emitter)
