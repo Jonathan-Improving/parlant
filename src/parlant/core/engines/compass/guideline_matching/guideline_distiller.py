@@ -20,13 +20,18 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from parlant.core.common import Criticality, DefaultBaseModel, JSONSerializable
-from parlant.core.engines.alpha.prompt_builder import BuiltInSection, PromptBuilder, SectionStatus
+from parlant.core.engines.alpha.prompt_builder import (
+    BuiltInSection,
+    EventAdaptationFormat,
+    PromptBuilder,
+    SectionStatus,
+)
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
 from parlant.core.engines.compass.guideline_matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )
-from parlant.core.engines.compass.common import get_dynamic_reasoning_effort
+from parlant.core.engines.compass.common import get_dynamic_reasoning_effort_for_matching
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent, GuidelineId
 from parlant.core.loggers import Logger
@@ -129,7 +134,7 @@ class GuidelineDistiller:
         inference = await self._schematic_generator.generate(
             prompt=prompt,
             hints={
-                "reasoning_effort": get_dynamic_reasoning_effort(context),
+                "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
                 "cache": {
                     "key": self._cache_key(context),
                     "breakpoint": self._cache_breakpoint(context),
@@ -174,7 +179,7 @@ class GuidelineDistiller:
                 inference = await self._schematic_generator.generate(
                     prompt=prompt,
                     hints={
-                        "reasoning_effort": get_dynamic_reasoning_effort(context),
+                        "reasoning_effort": get_dynamic_reasoning_effort_for_matching(context),
                         "cache": {
                             "key": self._cache_key(context),
                             "breakpoint": self._cache_breakpoint(context),
@@ -402,7 +407,9 @@ OUTPUT FORMAT
         builder.add_capabilities_for_guideline_matching(context.state.capabilities)
         if context.state.session_summary:
             builder.add_session_summary(context.state.session_summary)
-        builder.add_interaction_history(context.interaction.events)
+        builder.add_interaction_history(
+            context.interaction.events, format=EventAdaptationFormat.ROLE_SCRIPT
+        )
 
         return builder
 
