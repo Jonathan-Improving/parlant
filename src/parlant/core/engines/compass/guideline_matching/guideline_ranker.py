@@ -156,6 +156,7 @@ class GuidelineRanker:
                     "key": self._cache_key(context),
                     "breakpoint": self._cache_breakpoint(context),
                 },
+                "hedge_timeout": 5.0,
             },
         )
 

@@ -22,6 +22,7 @@ provider adapters (Gemini, OpenAI, ...) are tested in tests/adapters/nlp/.
 """
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence, cast
 
@@ -731,3 +732,141 @@ def test_that_parlant_tools_convert_to_tool_specs() -> None:
     assert not by_name["tags"].required
     # Exotic Parlant types fall back to "string".
     assert by_name["when"].type == "string"
+
+
+# ============================================================================
+# stream_step TTFT Hedging
+# ============================================================================
+
+
+@dataclass
+class _AttemptScript:
+    """Scripts one `_raw_stream` invocation: how long until its first event,
+    the events it then emits, and whether it errors instead (after the delay)."""
+
+    first_event_delay: float
+    events: list[ScriptedRawEvent] = field(default_factory=list)
+    error: BaseException | None = None
+
+
+class _HedgingProvider(ReactGenerator):
+    """A provider whose Nth `_raw_stream` call runs the Nth scripted attempt (the
+    last repeats), so the base class's TTFT hedging can be exercised."""
+
+    def __init__(self, attempts: list[_AttemptScript]) -> None:
+        super().__init__(model="fake-model")
+        self._attempts = attempts
+        self.raw_stream_started = 0
+        self.cancelled_attempts: list[int] = []
+
+    @property
+    def provider_name(self) -> str:
+        return "fake"
+
+    def _encode(
+        self,
+        history: Sequence[Message],
+        tools: Sequence[ToolSpec],
+        tool_choice: Any,
+        *,
+        reasoning: Any = None,
+        hints: Any = None,
+    ) -> Any:
+        return {}
+
+    async def _raw_stream(self, request: Any) -> Any:
+        index = self.raw_stream_started
+        self.raw_stream_started += 1
+        spec = self._attempts[min(index, len(self._attempts) - 1)]
+        try:
+            await asyncio.sleep(spec.first_event_delay)
+            if spec.error is not None:
+                raise spec.error
+            for scripted in spec.events:
+                yield scripted
+        except asyncio.CancelledError:
+            self.cancelled_attempts.append(index)
+            raise
+
+    def _decode(self, raw_event: Any, builder: TurnBuilder) -> list[StreamEvent]:
+        return cast(list[StreamEvent], raw_event(builder))
+
+
+async def _collect(generator: ReactGenerator, **hints: Any) -> StepResult:
+    result: StepResult | None = None
+    async for event in generator.stream_step(
+        [Message(role=Role.USER, parts=[TextPart(text="q")])],
+        hints=cast(Any, hints) if hints else None,
+    ):
+        if isinstance(event, StepCompleted):
+            result = event.result
+    assert result is not None
+    return result
+
+
+async def test_that_a_slow_first_event_triggers_a_hedge_and_the_faster_stream_wins() -> None:
+    generator = _HedgingProvider(
+        [
+            _AttemptScript(first_event_delay=5.0, events=[_text_event("slow")]),
+            _AttemptScript(first_event_delay=0.0, events=[_text_event("fast")]),
+        ]
+    )
+
+    result = await _collect(generator, hedge_timeout=0.05)
+
+    assert generator.raw_stream_started == 2
+    assert result.message.text == "fast"
+    assert generator.cancelled_attempts == [0]
+
+
+async def test_that_a_fast_first_event_is_not_hedged() -> None:
+    generator = _HedgingProvider(
+        [_AttemptScript(first_event_delay=0.0, events=[_text_event("quick")])]
+    )
+
+    result = await _collect(generator, hedge_timeout=0.5)
+
+    assert generator.raw_stream_started == 1
+    assert result.message.text == "quick"
+
+
+async def test_that_no_hedge_is_attempted_without_the_hint() -> None:
+    generator = _HedgingProvider(
+        [_AttemptScript(first_event_delay=0.05, events=[_text_event("only")])]
+    )
+
+    result = await _collect(generator)
+
+    assert generator.raw_stream_started == 1
+    assert result.message.text == "only"
+
+
+async def test_that_the_original_stream_still_wins_if_it_emits_before_the_hedge() -> None:
+    # Primary is slow enough to trigger the hedge, but still emits before the
+    # (even slower) hedge — so the primary wins and the hedge is cancelled.
+    generator = _HedgingProvider(
+        [
+            _AttemptScript(first_event_delay=0.1, events=[_text_event("primary")]),
+            _AttemptScript(first_event_delay=0.5, events=[_text_event("hedge")]),
+        ]
+    )
+
+    result = await _collect(generator, hedge_timeout=0.05)
+
+    assert generator.raw_stream_started == 2
+    assert result.message.text == "primary"
+    assert generator.cancelled_attempts == [1]
+
+
+async def test_that_a_hedge_raises_the_primary_error_when_both_streams_fail() -> None:
+    generator = _HedgingProvider(
+        [
+            _AttemptScript(first_event_delay=0.1, error=RuntimeError("primary-failure")),
+            _AttemptScript(first_event_delay=0.01, error=RuntimeError("hedge-failure")),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="primary-failure"):
+        await _collect(generator, hedge_timeout=0.05)
+
+    assert generator.raw_stream_started == 2

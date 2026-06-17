@@ -103,6 +103,11 @@ class ReactGeneratorHints(TypedDict, total=False):
     model_generation: NotRequired[ModelGeneration]
     model_type: NotRequired[ModelType]
     service_tier: NotRequired[ServiceTier]
+    # Seconds to wait for the first content-bearing event before hedging: if no
+    # event arrives within this window, an identical second stream is opened and
+    # whichever emits its first event first wins (the loser is cancelled). Absent
+    # / ``None`` / ``<= 0`` disables hedging. See ``ReactGenerator.stream_step``.
+    hedge_timeout: NotRequired[float]
 
 
 class ReactError(Exception):
@@ -667,6 +672,24 @@ def _prefill_tokenizer() -> tiktoken.Encoding:
 # ───────────────────────────── the abstract base ───────────────────────────
 
 
+@dataclass
+class _StreamAttempt:
+    """One in-flight stream within a hedged ``stream_step``.
+
+    Its events are pumped onto ``queue`` (terminated by a ``None`` sentinel).
+    ``first_event`` resolves ``True`` the moment the attempt emits a
+    content-bearing event (or completes cleanly without any) and ``False`` if it
+    errors before emitting — this is the signal the hedge race selects on. An
+    attempt that errors *after* winning records the exception in ``error`` so the
+    consumer can re-raise it once the buffered events have drained.
+    """
+
+    queue: asyncio.Queue[StreamEvent | None]
+    first_event: asyncio.Future[bool]
+    task: asyncio.Task[None] | None = None
+    error: BaseException | None = None
+
+
 class ReactGenerator(abc.ABC):
     """Provider-agnostic ReAct generator.
 
@@ -916,20 +939,44 @@ class ReactGenerator(abc.ABC):
         a single generator can serve many turns with different thinking settings.
         ``hints`` may override the underlying model and service tier per call.
         """
+        hints = hints or {}
         request = self._encode(
             history,
             tools,
             tool_choice,
             reasoning=reasoning or ReasoningConfig(),
-            hints=hints or {},
+            hints=hints,
         )
+
+        # When ``hints['hedge_timeout']`` is a positive number, hedge on TTFT: if
+        # the first event hasn't arrived within that window, open a second stream
+        # and forward whichever produces its first event first. Otherwise run a
+        # single stream with no hedging overhead.
+        hedge_timeout = hints.get("hedge_timeout")
+        if not (
+            isinstance(hedge_timeout, (int, float))
+            and not isinstance(hedge_timeout, bool)
+            and hedge_timeout > 0
+        ):
+            async for event in self._stream_attempt(request):
+                yield event
+            return
+
+        async for event in self._stream_hedged(request, float(hedge_timeout)):
+            yield event
+
+    async def _stream_attempt(self, request: Any) -> AsyncIterator[StreamEvent]:
+        """Drive one provider stream to completion: yield its normalized events,
+        ending with :class:`StepCompleted`.
+
+        TTFT is measured from the moment we open the provider stream to the first
+        content-bearing event (text, reasoning, or tool-call signal). It stays
+        0.0 if no first token arrives (empty / cancelled stream). We track it in a
+        local and stamp it onto ``builder.usage`` *after* the stream loop so
+        adapters' final ``builder.usage = self._decode_usage(...)`` assignment
+        (which typically lands on the closing usage event) can't clobber it.
+        """
         builder = TurnBuilder()
-        # TTFT measured from the moment we open the provider stream to the first
-        # content-bearing event (text, reasoning, or tool-call signal). Stays
-        # 0.0 if no first token arrives (empty / cancelled stream). We track it
-        # in a local and stamp it onto ``builder.usage`` *after* the stream loop
-        # so adapters' final ``builder.usage = self._decode_usage(...)`` assignment
-        # (which typically lands on the closing usage event) can't clobber it.
         request_started_at = time.monotonic()
         ttft: float = 0.0
         async for raw in self._raw_stream(request):
@@ -939,6 +986,99 @@ class ReactGenerator(abc.ABC):
                 yield event
         builder.usage.ttft = ttft
         yield StepCompleted(result=builder.finish())
+
+    async def _stream_hedged(
+        self,
+        request: Any,
+        hedge_timeout: float,
+    ) -> AsyncIterator[StreamEvent]:
+        """Run :meth:`stream_step` with TTFT hedging.
+
+        Open one stream; if it hasn't emitted its first event within
+        ``hedge_timeout``, open a second identical stream and forward whichever
+        emits first, cancelling the loser. Safe to double-open because a step is a
+        pure read with no side effects.
+        """
+        attempts: list[_StreamAttempt] = []
+        try:
+            attempts.append(self._spawn_attempt(request))
+
+            done, _ = await asyncio.wait({attempts[0].first_event}, timeout=hedge_timeout)
+            if not done:
+                # First event didn't arrive in time — fire the hedge.
+                attempts.append(self._spawn_attempt(request))
+
+            winner = await self._select_winner(attempts)
+
+            for attempt in attempts:
+                if attempt is not winner and attempt.task is not None:
+                    attempt.task.cancel()
+
+            while True:
+                event = await winner.queue.get()
+                if event is None:
+                    break
+                yield event
+
+            if winner.error is not None:
+                raise winner.error
+        finally:
+            for attempt in attempts:
+                if attempt.task is not None and not attempt.task.done():
+                    attempt.task.cancel()
+            await asyncio.gather(
+                *(a.task for a in attempts if a.task is not None),
+                return_exceptions=True,
+            )
+
+    def _spawn_attempt(self, request: Any) -> _StreamAttempt:
+        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+        first_event: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        attempt = _StreamAttempt(queue=queue, first_event=first_event)
+        attempt.task = asyncio.ensure_future(self._pump_attempt(request, attempt))
+        return attempt
+
+    async def _pump_attempt(self, request: Any, attempt: _StreamAttempt) -> None:
+        """Forward one attempt's events onto its queue, signalling ``first_event``
+        on the first content-bearing event so the hedge race can pick a winner the
+        instant tokens start."""
+        produced_content = False
+        try:
+            async for event in self._stream_attempt(request):
+                attempt.queue.put_nowait(event)
+                if not produced_content and isinstance(
+                    event, (TextDelta, ReasoningDelta, ToolCallStarted)
+                ):
+                    produced_content = True
+                    if not attempt.first_event.done():
+                        attempt.first_event.set_result(True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            attempt.error = exc
+        finally:
+            attempt.queue.put_nowait(None)
+            if not attempt.first_event.done():
+                # Terminated before any content event: viable iff it ended cleanly
+                # (an empty turn still yields a StepCompleted); not viable if it
+                # errored — its error is recorded for the all-failed path.
+                attempt.first_event.set_result(attempt.error is None)
+
+    @staticmethod
+    async def _select_winner(attempts: list[_StreamAttempt]) -> _StreamAttempt:
+        """Return the first attempt to become viable (emit content or complete
+        cleanly). If every attempt errors before producing content, re-raise the
+        primary (first) attempt's error."""
+        by_future = {a.first_event: a for a in attempts}
+        pending: set[asyncio.Future[bool]] = set(by_future)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for future in done:
+                if future.result():
+                    return by_future[future]
+        primary_error = attempts[0].error
+        assert primary_error is not None
+        raise primary_error
 
     async def step(
         self,

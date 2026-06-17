@@ -25,7 +25,7 @@ class StreamingLoop(BaseLoop):
     message event's growing buffer + `chunks`, so consumers can render it as it's
     produced. The final step-completion update null-terminates `chunks`."""
 
-    async def _update_message(
+    async def _surface_message_event(
         self,
         context: EngineContext,
         state: _LoopState,
@@ -33,14 +33,14 @@ class StreamingLoop(BaseLoop):
     ) -> None:
         match event:
             case TextDelta(text=text):
-                if state.message_handle is None:  # First message chunk
-                    if not self._additional_preamble_is_needed(state):
-                        if state.message_buffer is None:
-                            state.message_buffer = StringIO()
-                            state.message_chunks = []
+                if state.message.handle is None:  # First message chunk
+                    if not self._tool_preamble_is_allowed(state):
+                        if state.message.buffer is None:
+                            state.message.buffer = StringIO()
+                            state.message.chunks = []
 
-                        state.message_buffer.write(text)
-                        state.message_chunks.append(text)
+                        state.message.buffer.write(text)
+                        state.message.chunks.append(text)
                         return
 
                     await context.session_event_emitter.emit_status_event(
@@ -48,44 +48,44 @@ class StreamingLoop(BaseLoop):
                         data=StatusEventData(status="typing"),
                     )
 
-                    state.message_buffer = StringIO()
-                    state.message_buffer.write(text)
-                    state.message_chunks = [text]
+                    state.message.buffer = StringIO()
+                    state.message.buffer.write(text)
+                    state.message.chunks = [text]
 
-                    state.message_handle = await context.session_event_emitter.emit_message_event(
+                    state.message.handle = await context.session_event_emitter.emit_message_event(
                         trace_id=context.tracer.trace_id,
                         data=MessageEventData(
-                            message=state.message_buffer.getvalue(),
+                            message=state.message.buffer.getvalue(),
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
-                            chunks=state.message_chunks,
+                            chunks=state.message.chunks,
                         ),
                     )
                     self._mark_user_visible_message_emitted(state)
                 else:  # Subsequent message chunk
-                    assert state.message_buffer is not None
+                    assert state.message.buffer is not None
 
-                    state.message_buffer.write(text)
-                    state.message_chunks.append(text)
+                    state.message.buffer.write(text)
+                    state.message.chunks.append(text)
 
-                    state.message_handle = await state.message_handle.update(
+                    state.message.handle = await state.message.handle.update(
                         MessageEventData(
-                            message=state.message_buffer.getvalue(),
+                            message=state.message.buffer.getvalue(),
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
-                            chunks=state.message_chunks,
+                            chunks=state.message.chunks,
                         ),
                     )
-            case ToolCallStarted() if state.message_handle is not None:
+            case ToolCallStarted() if state.message.handle is not None:
                 # Text -> tool transition within a step: finalize the in-flight message
                 # as its own bubble so post-tool text starts a fresh one (and the tool
                 # status follows the message). The buffer is what was actually shown.
-                buffered = state.message_buffer.getvalue() if state.message_buffer else ""
+                buffered = state.message.buffer.getvalue() if state.message.buffer else ""
                 preamble = self._tool_preamble_text(buffered)
 
-                await state.message_handle.update(
+                await state.message.handle.update(
                     MessageEventData(
                         message=preamble,
                         participant=Participant(
@@ -95,52 +95,43 @@ class StreamingLoop(BaseLoop):
                     )
                 )
 
-                state.emitted_message_len += len(preamble)
-                state.allowed_tool_message_text_len = state.emitted_message_len
-                state.message_buffer = None
-                state.message_chunks = []
-                state.message_handle = None
-            case ToolCallStarted() if state.message_buffer is not None:
-                state.allowed_tool_message_text_len = 0
-                state.suppress_current_tool_message_text = bool(state.message_buffer.getvalue())
-                state.message_buffer = None
-                state.message_chunks = []
+                state.message.emitted_len += len(preamble)
+                state.message.keep_tool_text_prefix(state.message.emitted_len)
+                state.message.clear_transient_output()
+            case ToolCallStarted() if state.message.buffer is not None:
+                state.message.suppress_tool_text()
+                state.message.clear_transient_output()
             case StepCompleted(result=result):
                 # Emit the authoritative remainder: everything this step's message holds
                 # beyond what interrupt-splits already emitted. Anchoring on
                 # `result.message.text` (not the raw buffer) keeps the final segment
                 # correct even if a provider delivered tail text outside the deltas.
-                remaining = result.message.text[state.emitted_message_len :]
+                remaining = result.message.text[state.message.emitted_len :]
 
-                if state.message_handle is not None:
-                    await state.message_handle.update(
+                if state.message.handle is not None:
+                    await state.message.handle.update(
                         MessageEventData(
                             message=remaining,
                             participant=Participant(
                                 id=context.agent.id, display_name=context.agent.name
                             ),
-                            chunks=[*state.message_chunks, None],
+                            chunks=[*state.message.chunks, None],
                         )
                     )
 
-                    state.message_buffer = None
-                    state.message_chunks = []
-                    state.message_handle = None
+                    state.message.clear_transient_output()
                     if result.needs_tools:
-                        state.allowed_tool_message_text_len = len(result.message.text)
-                    state.emitted_message_len = 0
+                        state.message.keep_tool_text_prefix(len(result.message.text))
+                    state.message.emitted_len = 0
 
                     await self._complete_message_step(context, result)
-                elif result.needs_tools and state.allowed_tool_message_text_len is not None:
-                    state.message_buffer = None
-                    state.message_chunks = []
-                    state.emitted_message_len = 0
-                elif result.needs_tools and not self._additional_preamble_is_needed(state):
-                    state.allowed_tool_message_text_len = 0
-                    state.suppress_current_tool_message_text = bool(result.message.text)
-                    state.message_buffer = None
-                    state.message_chunks = []
-                    state.emitted_message_len = 0
+                elif result.needs_tools and state.message.has_custom_commit_policy():
+                    state.message.clear_transient_output()
+                    state.message.emitted_len = 0
+                elif result.needs_tools and not self._tool_preamble_is_allowed(state):
+                    state.message.suppress_tool_text()
+                    state.message.clear_transient_output()
+                    state.message.emitted_len = 0
                 elif remaining:
                     # Text arrived only in the final message (no deltas streamed) — emit
                     # it once as a complete, terminated message.
@@ -159,10 +150,10 @@ class StreamingLoop(BaseLoop):
                     )
                     self._mark_user_visible_message_emitted(state)
                     if result.needs_tools:
-                        state.allowed_tool_message_text_len = len(preamble)
+                        state.message.keep_tool_text_prefix(len(preamble))
 
-                    state.emitted_message_len = 0
+                    state.message.emitted_len = 0
 
                     await self._complete_message_step(context, result)
                 else:
-                    state.emitted_message_len = 0
+                    state.message.emitted_len = 0

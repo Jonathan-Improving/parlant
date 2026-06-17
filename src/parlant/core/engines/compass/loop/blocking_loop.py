@@ -26,7 +26,7 @@ class BlockingLoop(BaseLoop):
     non-streamed message. Text deltas still arrive from the provider; they're just
     not surfaced until the message is whole."""
 
-    async def _update_message(
+    async def _surface_message_event(
         self,
         context: EngineContext,
         state: _LoopState,
@@ -38,24 +38,23 @@ class BlockingLoop(BaseLoop):
                 # needed to split the message on a text -> tool transition and to know
                 # what was already shown. Show a typing indicator on the first text of
                 # each segment.
-                if state.message_buffer is None:  # First text since the last emit
+                if state.message.buffer is None:  # First text since the last emit
                     await context.session_event_emitter.emit_status_event(
                         trace_id=context.tracer.trace_id,
                         data=StatusEventData(status="typing"),
                     )
-                    state.message_buffer = StringIO()
+                    state.message.buffer = StringIO()
 
-                state.message_buffer.write(text)
-            case ToolCallStarted() if state.message_buffer is not None:
+                state.message.buffer.write(text)
+            case ToolCallStarted() if state.message.buffer is not None:
                 # Text -> tool transition within a step: emit the text so far as its own
                 # complete message before the tool status, so post-tool text isn't glued
                 # onto it.
-                buffered = state.message_buffer.getvalue()
+                buffered = state.message.buffer.getvalue()
 
-                if not self._additional_preamble_is_needed(state):
-                    state.allowed_tool_message_text_len = 0
-                    state.suppress_current_tool_message_text = bool(buffered)
-                    state.message_buffer = None
+                if not self._tool_preamble_is_allowed(state):
+                    state.message.suppress_tool_text()
+                    state.message.buffer = None
                     return
 
                 preamble = self._tool_preamble_text(buffered)
@@ -71,27 +70,26 @@ class BlockingLoop(BaseLoop):
                         ),
                     )
                     self._mark_user_visible_message_emitted(state)
-                    state.emitted_message_len += len(preamble)
-                    state.allowed_tool_message_text_len = state.emitted_message_len
+                    state.message.emitted_len += len(preamble)
+                    state.message.keep_tool_text_prefix(state.message.emitted_len)
 
-                state.message_buffer = None
+                state.message.buffer = None
             case StepCompleted(result=result):
                 # Emit the authoritative remainder once, complete and without `chunks`:
                 # everything the step's message holds beyond what interrupt-splits
                 # already emitted. Anchoring on `result.message.text` (not the buffer)
                 # keeps it correct even if a provider delivered text outside the deltas.
-                remaining = result.message.text[state.emitted_message_len :]
+                remaining = result.message.text[state.message.emitted_len :]
 
-                if result.needs_tools and state.allowed_tool_message_text_len is not None:
-                    state.message_buffer = None
-                    state.emitted_message_len = 0
+                if result.needs_tools and state.message.has_custom_commit_policy():
+                    state.message.buffer = None
+                    state.message.emitted_len = 0
                     return
 
-                if result.needs_tools and not self._additional_preamble_is_needed(state):
-                    state.allowed_tool_message_text_len = 0
-                    state.suppress_current_tool_message_text = bool(result.message.text)
-                    state.message_buffer = None
-                    state.emitted_message_len = 0
+                if result.needs_tools and not self._tool_preamble_is_allowed(state):
+                    state.message.suppress_tool_text()
+                    state.message.buffer = None
+                    state.message.emitted_len = 0
                     return
 
                 preamble = self._tool_preamble_text(remaining) if result.needs_tools else remaining
@@ -108,10 +106,10 @@ class BlockingLoop(BaseLoop):
                     )
                     self._mark_user_visible_message_emitted(state)
                     if result.needs_tools:
-                        state.allowed_tool_message_text_len = len(preamble)
+                        state.message.keep_tool_text_prefix(len(preamble))
 
-                state.message_buffer = None
-                state.emitted_message_len = 0
+                state.message.buffer = None
+                state.message.emitted_len = 0
 
                 if result.message.text:
                     await self._complete_message_step(context, result)

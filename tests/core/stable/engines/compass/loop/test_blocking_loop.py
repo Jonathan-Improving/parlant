@@ -47,7 +47,7 @@ from tests.core.stable.engines.compass.guideline_matching.utils import (
 
 
 def _make_blocking_loop() -> BlockingLoop:
-    # _update_message only touches the session event emitter and the loop state,
+    # _surface_message_event only touches the session event emitter and the loop state,
     # so the heavier collaborators aren't exercised here.
     tracer = LocalTracer()
     logger = StdoutLogger(tracer)
@@ -239,7 +239,7 @@ async def test_that_tool_call_step_is_committed_before_tool_results_are_appended
         usage=Usage(),
     )
 
-    committed = await loop._update_tool_calls(context, state, StepCompleted(result=result))
+    committed = await loop._process_tool_event(context, state, StepCompleted(result=result))
 
     assert committed is True
     assert [m.role for m in state.history] == [Role.ASSISTANT, Role.TOOL]
@@ -265,8 +265,8 @@ async def test_that_blocking_loop_emits_a_single_complete_message_event_without_
     # them incrementally — the whole message is emitted once on step completion.
     events = [TextDelta(text="Hello "), TextDelta(text="there!"), StepCompleted(result=result)]
     for event in events:
-        await loop._update_message(context, state, event)
-        await loop._commit_new_event(state, event)
+        await loop._surface_message_event(context, state, event)
+        await loop._commit_react_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
@@ -369,7 +369,7 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
         StepCompleted(result=result),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
+        await loop._surface_message_event(context, state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_texts = [
@@ -394,7 +394,7 @@ async def test_that_blocking_tool_preamble_is_trimmed_to_one_sentence() -> None:
         ToolCallStarted(id="call-1", name="get_reservation_details"),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
+        await loop._surface_message_event(context, state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
@@ -429,8 +429,8 @@ async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_co
         StepCompleted(result=result),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
-        await loop._commit_new_event(state, event)
+        await loop._surface_message_event(context, state, event)
+        await loop._commit_react_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
@@ -447,8 +447,8 @@ async def test_that_blocking_tool_preambles_are_allowed_after_fifteen_seconds() 
     loop = _make_blocking_loop()
     state = _LoopState()
     loop._mark_user_visible_message_emitted(state)
-    assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    assert state.preamble.last_user_visible_message_at is not None
+    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(
@@ -466,8 +466,8 @@ async def test_that_blocking_tool_preambles_are_allowed_after_fifteen_seconds() 
         StepCompleted(result=result),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
-        await loop._commit_new_event(state, event)
+        await loop._surface_message_event(context, state, event)
+        await loop._commit_react_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cached_property
@@ -45,6 +46,14 @@ T = TypeVar("T", bound=DefaultBaseModel)
 ReasoningEffort = Literal["minimal", "low", "medium", "high"]
 
 REASONING_EFFORT_HINT = "reasoning_effort"
+
+
+# When present in ``generate``'s ``hints`` with a positive float value, the request
+# is hedged: if the first attempt hasn't returned within this many seconds, an
+# identical second request is fired and whichever completes first wins (the loser
+# is cancelled). Safe because schematic generation is a pure read with no side
+# effects. Absent / ``None`` / ``<= 0`` disables hedging.
+HEDGE_TIMEOUT_HINT = "hedge_timeout"
 
 
 # ============================================================================
@@ -368,7 +377,7 @@ class BaseSchematicGenerator(SchematicGenerator[T]):
             start = Stopwatch.start()
 
             try:
-                result = await self.do_generate(prompt, hints)
+                result = await self._generate_maybe_hedged(prompt, hints)
             except Exception as exc:
                 self.tracer.add_event(
                     "gen.request_failed",
@@ -394,6 +403,67 @@ class BaseSchematicGenerator(SchematicGenerator[T]):
                 )
 
             return result
+
+    async def _generate_maybe_hedged(
+        self,
+        prompt: str | PromptBuilder,
+        hints: Mapping[str, Any],
+    ) -> SchematicGenerationResult[T]:
+        """Run ``do_generate``, optionally hedging on latency.
+
+        When ``hints`` carries a positive ``HEDGE_TIMEOUT_HINT`` and the
+        first attempt hasn't returned within that window, fire an identical
+        second request and return whichever finishes first; the loser is
+        cancelled. Hedging only reacts to *slowness* — if the first attempt
+        raises before the window elapses, that error propagates (errors are the
+        provider's retry policy's job). Safe to double-fire because schematic
+        generation is a pure read with no side effects.
+        """
+        delay = hints.get(HEDGE_TIMEOUT_HINT)
+        should_hedge = isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0
+
+        first: asyncio.Task[SchematicGenerationResult[T]] = asyncio.ensure_future(
+            self.do_generate(prompt, hints)
+        )
+
+        if not should_hedge:
+            return await first
+
+        done, _ = await asyncio.wait({first}, timeout=float(cast(float, delay)))
+        if first in done:
+            return first.result()
+
+        self.tracer.add_event(
+            "gen.request_hedged",
+            attributes={
+                "model.name": self.model_name,
+                "schema.name": self.schema.__name__,
+                "hedge_timeout": float(cast(float, delay)),
+            },
+        )
+
+        second: asyncio.Task[SchematicGenerationResult[T]] = asyncio.ensure_future(
+            self.do_generate(prompt, hints)
+        )
+        attempts = [first, second]
+
+        try:
+            pending: set[asyncio.Task[SchematicGenerationResult[T]]] = {first, second}
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.exception() is None:
+                        return task.result()
+
+            # Both attempts failed — surface the first attempt's error.
+            error = first.exception()
+            assert error is not None
+            raise error
+        finally:
+            for task in attempts:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*attempts, return_exceptions=True)
 
     def _report_health(
         self,

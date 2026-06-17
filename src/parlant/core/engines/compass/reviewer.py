@@ -131,6 +131,7 @@ class Reviewer:
                     "key": f"{self._cache_key(context)}.high",
                     "breakpoint": self._CACHE_BREAKPOINT,
                 },
+                "hedge_timeout": 15.0,
             },
         )
 
@@ -193,6 +194,7 @@ class Reviewer:
                     "key": f"{self._cache_key(context)}.low",
                     "breakpoint": self._CACHE_BREAKPOINT,
                 },
+                "hedge_timeout": 10.0,
             },
         )
 

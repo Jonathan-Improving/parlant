@@ -132,16 +132,16 @@ async def test_that_tool_preamble_note_is_injected_initially_and_after_fifteen_s
     assert "exactly one short, natural sentence" in instructions_text
 
     loop._mark_user_visible_message_emitted(state)
-    assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS - 1
+    assert state.preamble.last_user_visible_message_at is not None
+    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS - 1
     await loop._update_step_instructions(job, state)
     instructions_text = "\n".join(message.text for message in state.history)
     assert "Tool communication before tool use" in instructions_text
     assert "Less than 15 seconds have passed since your last message" in instructions_text
     assert "Run the next tool silently" in instructions_text
 
-    assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= 2
+    assert state.preamble.last_user_visible_message_at is not None
+    state.preamble.last_user_visible_message_at -= 2
     await loop._update_step_instructions(job, state)
 
     instructions_text = "\n".join(message.text for message in state.history)
@@ -180,23 +180,25 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
     loop = _make_streaming_loop()
     state = _LoopState()
 
-    await loop._update_message(context, state, TextDelta(text="Let me check that for you."))
-    assert state.message_buffer is not None
+    await loop._surface_message_event(context, state, TextDelta(text="Let me check that for you."))
+    assert state.message.buffer is not None
 
     await loop._reset_message_after_restart(context, state)
-    assert state.message_handle is None
-    assert state.message_buffer is None
-    assert state.message_chunks == []
+    assert state.message.handle is None
+    assert state.message.buffer is None
+    assert state.message.chunks == []
     assert state.in_the_middle_of_running_tools is False
 
     context.state.step_notes = "Ask for confirmation instead of calling the tool."
-    assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    assert state.preamble.last_user_visible_message_at is not None
+    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
 
     # The retry's text starts a NEW message, not appended to the rejected preamble.
-    await loop._update_message(context, state, TextDelta(text="Actually, here's the answer."))
-    assert state.message_buffer is not None
-    assert state.message_buffer.getvalue() == "Actually, here's the answer."
+    await loop._surface_message_event(
+        context, state, TextDelta(text="Actually, here's the answer.")
+    )
+    assert state.message.buffer is not None
+    assert state.message.buffer.getvalue() == "Actually, here's the answer."
 
     # Two separate message events were emitted; the latest carries no preamble.
     emitter = cast(EventBuffer, context.session_event_emitter)
@@ -224,7 +226,7 @@ async def test_that_text_after_a_tool_call_in_one_step_is_suppressed_after_the_p
         TextDelta(text="There are no direct flights."),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
+        await loop._surface_message_event(context, state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_texts = [
@@ -248,7 +250,7 @@ async def test_that_streamed_tool_preamble_is_trimmed_to_one_sentence() -> None:
         ToolCallStarted(id="call-1", name="get_reservation_details"),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
+        await loop._surface_message_event(context, state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
@@ -282,8 +284,8 @@ async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_co
         StepCompleted(result=result),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
-        await loop._commit_new_event(state, event)
+        await loop._surface_message_event(context, state, event)
+        await loop._commit_react_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
@@ -299,8 +301,8 @@ async def test_that_streamed_tool_preambles_are_allowed_after_fifteen_seconds() 
     loop = _make_streaming_loop()
     state = _LoopState()
     loop._mark_user_visible_message_emitted(state)
-    assert state.last_user_visible_message_at is not None
-    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    assert state.preamble.last_user_visible_message_at is not None
+    state.preamble.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(
@@ -318,8 +320,8 @@ async def test_that_streamed_tool_preambles_are_allowed_after_fifteen_seconds() 
         StepCompleted(result=result),
     ]
     for event in events:
-        await loop._update_message(context, state, event)
-        await loop._commit_new_event(state, event)
+        await loop._surface_message_event(context, state, event)
+        await loop._commit_react_event(state, event)
 
     emitter = cast(EventBuffer, context.session_event_emitter)
     message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
