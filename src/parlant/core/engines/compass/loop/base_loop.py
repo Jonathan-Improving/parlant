@@ -1076,7 +1076,7 @@ class BaseLoop(Loop):
                 await asyncio.sleep(wait)
 
     async def _give_up(self, job: LoopJob, state: _LoopState, reason: str) -> None:
-        self._logger.error(
+        self._logger.warning(
             f"{reason} Forcing a final message on session {job.context.session.id} "
             f"({job.context.session.title or 'Untitled'}). Reasoning: \n"
             f"{json.dumps(job.context.state.reasoning_steps, indent=2)}"
