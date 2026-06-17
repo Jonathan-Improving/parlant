@@ -145,6 +145,8 @@ class _LoopState:
     # `result.message.text[emitted_message_len:]` â€” the authoritative remainder.
     emitted_message_len: int = 0
     user_visible_message_emitted: bool = False
+    last_user_visible_message_at: float | None = None
+    allowed_tool_message_text_len: int | None = None
     suppress_current_tool_message_text: bool = False
 
     force_message_response: bool = False
@@ -171,6 +173,7 @@ class BaseLoop(Loop):
     # Retry a step on a transient ReactError, but only before any event has been
     # emitted (a stream can't be replayed mid-flight). Waits between attempts.
     _STREAM_RETRY_WAITS = (2.0, 8.0, 32.0)
+    _TOOL_PREAMBLE_INTERVAL_SECONDS = 10.0
 
     def __init__(
         self,
@@ -381,22 +384,57 @@ class BaseLoop(Loop):
     async def _get_tools(self, context: EngineContext) -> list[ToolSpec]:
         return [*tool_specs_from_tools(context.state.available_tools)]
 
-    def _can_emit_tool_preamble(self, context: EngineContext, state: _LoopState) -> bool:
-        return not state.user_visible_message_emitted or bool(context.state.step_notes)
+    def _additional_preamble_is_needed(self, state: _LoopState) -> bool:
+        if not state.user_visible_message_emitted or state.last_user_visible_message_at is None:
+            return True
+
+        return (
+            asyncio.get_event_loop().time() - state.last_user_visible_message_at
+            > self._TOOL_PREAMBLE_INTERVAL_SECONDS
+        )
+
+    def _mark_user_visible_message_emitted(self, state: _LoopState) -> None:
+        state.user_visible_message_emitted = True
+        state.last_user_visible_message_at = asyncio.get_event_loop().time()
+
+    def _message_with_text_prefix(self, message: Message, prefix_len: int) -> Message:
+        remaining = prefix_len
+        parts = []
+
+        for part in message.parts:
+            if isinstance(part, TextPart):
+                if remaining <= 0:
+                    continue
+
+                text = part.text[:remaining]
+                remaining -= len(text)
+                if text:
+                    parts.append(TextPart(text=text, provider_data=part.provider_data))
+            else:
+                parts.append(part)
+
+        return Message(
+            role=message.role,
+            parts=parts,
+            provider_data=message.provider_data,
+            cache_key=message.cache_key,
+        )
 
     async def _commit_new_event(self, state: _LoopState, event: StreamEvent) -> None:
         if isinstance(event, StepCompleted):
             message = event.result.message
-            if state.suppress_current_tool_message_text and event.result.needs_tools:
-                message = Message(
-                    role=message.role,
-                    parts=[part for part in message.parts if not isinstance(part, TextPart)],
-                    provider_data=message.provider_data,
-                    cache_key=message.cache_key,
-                )
+            if event.result.needs_tools:
+                if state.allowed_tool_message_text_len is not None:
+                    message = self._message_with_text_prefix(
+                        message,
+                        state.allowed_tool_message_text_len,
+                    )
+                elif state.suppress_current_tool_message_text:
+                    message = self._message_with_text_prefix(message, 0)
 
             state.history.append(message)
             state.steps.append(event.result)
+            state.allowed_tool_message_text_len = None
             state.suppress_current_tool_message_text = False
 
             if event.result.message.reasoning:
@@ -922,13 +960,20 @@ The following is notes and context about the current state of the conversation â
                 "#### Suggested reasoning for the next step\n\n" + job.context.state.step_notes
             )
 
-        if not state.user_visible_message_emitted or job.context.state.step_notes:
+        if not state.user_visible_message_emitted:
             reviewer_notes.append(
                 "#### Tool communication before tool use\n\n"
-                "If you need to use tools in this step, you should first send one short, "
-                "natural sentence to the user about what you are checking (Let me do X; Checking Y; Just a moment while I Z...). Keep it "
-                "specific to the current action, and avoid repeating wording from "
-                "earlier messages."
+                "If you need to use *a new tool* for this step, you should first send one "
+                "short, natural sentence to the user about what you are checking "
+                "(Checking X; Let me do Y; Just a moment while I Z...). Keep it specific "
+                "to the current action, and avoid repeating wording from earlier messages."
+            )
+        elif self._additional_preamble_is_needed(state):
+            reviewer_notes.append(
+                "#### Tool communication before tool use\n\n"
+                "More than 10 seconds have passed since your last message to the user. "
+                "If you need to use *a new tool* for this step, please update them on "
+                "what you're currently doing before running the next tool."
             )
 
         if state.force_message_note:

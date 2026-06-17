@@ -391,7 +391,8 @@ async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_co
     context.state = ResponseState()
 
     loop = _make_blocking_loop()
-    state = _LoopState(user_visible_message_emitted=True)
+    state = _LoopState()
+    loop._mark_user_visible_message_emitted(state)
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(
@@ -417,4 +418,44 @@ async def test_that_subsequent_blocking_tool_preambles_are_suppressed_and_not_co
 
     assert message_events == []
     assert state.history[-1].text == ""
+    assert state.history[-1].tool_calls == [tool_call]
+
+
+async def test_that_blocking_tool_preambles_are_allowed_after_ten_seconds() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+
+    loop = _make_blocking_loop()
+    state = _LoopState()
+    loop._mark_user_visible_message_emitted(state)
+    assert state.last_user_visible_message_at is not None
+    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+
+    tool_call = ToolCallPart(id="call-1", name="search_flights")
+    result = StepResult(
+        message=Message(
+            role=Role.ASSISTANT,
+            parts=[TextPart(text="I'll check another airport."), tool_call],
+        ),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    events = [
+        TextDelta(text="I'll check another airport."),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        StepCompleted(result=result),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+        await loop._commit_new_event(state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert len(message_events) == 1
+    assert cast(dict[str, Any], message_events[0].data)["message"] == (
+        "I'll check another airport."
+    )
+    assert state.history[-1].text == "I'll check another airport."
     assert state.history[-1].tool_calls == [tool_call]

@@ -17,7 +17,12 @@ import traceback
 from typing import cast
 from typing_extensions import override
 
-from parlant.core.async_utils import CancellationSuppressionLatch, delay, latched_shield
+from parlant.core.async_utils import (
+    CancellationSuppressionLatch,
+    delay,
+    latched_shield,
+    safe_gather,
+)
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.emissions import EventEmitter
 from parlant.core.engines.entity_context import EntityContext
@@ -74,7 +79,11 @@ class CompassEngine(Engine):
         )
 
         await self._load_usable_guidelines(engine_context)
-        await self._responder.prefill(engine_context)
+
+        await safe_gather(
+            self._matcher.prefill(engine_context),
+            self._responder.prefill(engine_context),
+        )
 
     @override
     async def process(
@@ -123,7 +132,10 @@ class CompassEngine(Engine):
             # instructions after each step, to reevaluate guidelines gated on the
             # tools that just ran.
             await self._responder.respond(engine_context, self._refresh_state)
+
             await self._compact_if_needed(engine_context)
+
+            await self._matcher.prefill(engine_context)  # Optimize the cache for the next turn
         except Exception as e:
             self._logger.error(
                 f"Error processing context: {e}\n\n{''.join(traceback.format_exception(type(e), e, e.__traceback__))}"

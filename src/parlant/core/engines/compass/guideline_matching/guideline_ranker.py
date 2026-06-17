@@ -103,25 +103,20 @@ class GuidelineRanker:
             return GuidelineRankingResult([], None)
 
         with self._tracer.span("guideline.rank"):
-            if len(guidelines) > 1:
-                # Warm-then-fan-out: rank the first guideline and AWAIT it before
-                # fanning out the rest concurrently. For a provider with automatic
-                # prefix caching (OpenAI), this populates the cache for the shared
-                # prefix so the fan-out reads it warm instead of all racing a cold
-                # one; for explicit caching (Gemini) prefill already created the
-                # cache, so the first request simply hits it. Costs one serialized
-                # request of latency; only worth it when there's more than one.
-                first = await self._rank_guideline(context, guidelines[0])
-                rest = await asyncio.gather(
-                    *(self._rank_guideline(context, guideline) for guideline in guidelines[1:])
-                )
-                results = [first, *rest]
-            else:
-                results = [await self._rank_guideline(context, guidelines[0])]
+            t_start = asyncio.get_event_loop().time()
+
+            results = await asyncio.gather(
+                *(self._rank_guideline(context, guideline) for guideline in guidelines)
+            )
+
+            t_end = asyncio.get_event_loop().time()
 
             return GuidelineRankingResult(
                 ranked_guidelines=[ranked for ranked, _ in results],
-                generation_info=aggregate_generation_info([info for _, info in results]),
+                generation_info=aggregate_generation_info(
+                    [info for _, info in results],
+                    total_duration=t_end - t_start,
+                ),
             )
 
     def _should_include_tldr(self, context: EngineContext) -> bool:

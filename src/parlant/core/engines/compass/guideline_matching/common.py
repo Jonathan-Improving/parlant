@@ -47,7 +47,10 @@ While preparing the current response, you (the agent) have already reasoned thro
     )
 
 
-def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo:
+def aggregate_generation_info(
+    infos: Sequence[GenerationInfo],
+    total_duration: float | None = None,
+) -> GenerationInfo:
     """Aggregate usage across the per-guideline requests of a fan-out: tokens are
     summed, duration is the max (the requests run concurrently, so it reflects
     wall-clock, not total work), and token breakdowns in ``extra`` (possibly
@@ -55,7 +58,9 @@ def aggregate_generation_info(infos: Sequence[GenerationInfo]) -> GenerationInfo
     return GenerationInfo(
         schema_name=infos[0].schema_name,
         model=infos[0].model,
-        duration=max(info.duration for info in infos),
+        duration=total_duration
+        if total_duration is not None
+        else max(info.duration for info in infos),
         usage=UsageInfo(
             input_tokens=sum(info.usage.input_tokens for info in infos),
             output_tokens=sum(info.usage.output_tokens for info in infos),

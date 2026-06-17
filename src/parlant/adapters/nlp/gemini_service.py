@@ -191,16 +191,19 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
 
         self._tokenizer = GoogleEstimatingTokenizer(client=self._client, model_name=self.model_name)
 
-        # Explicit Gemini caching (store/load via the `cache` hint). Keyed by the
-        # caller's cache key → (resource name, cached prefix text, expiry); a load
-        # strips the stored prefix and sends only the live suffix referencing it.
+        # Explicit Gemini caching via the `cache` hint's breakpoint. Keyed by the
+        # caller's cache key + prefix hash → (resource name, cached prefix text, expiry);
+        # a cached request strips the stored prefix and sends only the live suffix
+        # referencing it.
         # A bounded TTL map: it can't grow without limit, and entries lapse on their
         # own — we never delete the underlying caches (they reclaim server-side at
         # their own TTL), which also avoids deleting one out from under a live load.
         self._managed_caches: cachetools.TTLCache[str, tuple[str, str, datetime]] = (
             cachetools.TTLCache(maxsize=1024, ttl=self._DEFAULT_CACHE_TTL_SECONDS)
         )
-        self._uncacheable_prefixes: set[str] = set()
+        self._uncacheable_prefixes: cachetools.LRUCache[str, bool] = cachetools.LRUCache(
+            maxsize=256
+        )
         self._cache_lock = asyncio.Lock()
 
     @property
@@ -257,20 +260,8 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
         tools, tool_config = self._output_tools()
 
         cache_hint = hints.get("cache") or {}
-        cache_action = cache_hint.get("action")
         cache_key = cache_hint.get("key")
         cache_breakpoint = cache_hint.get("breakpoint")
-
-        # Backward-compatible STORE without a breakpoint: create/refresh the whole
-        # prompt as a side effect, then fall through to a normal inline generation.
-        if cache_action == "store" and cache_key and not cache_breakpoint:
-            await self._store_cache(
-                key=cache_key,
-                prefix_text=prompt,
-                ttl_seconds=int(cache_hint.get("ttl", self._DEFAULT_CACHE_TTL_SECONDS)),
-                tools=tools,
-                tool_config=tool_config,
-            )
 
         # Declarative caching: if a breakpoint is supplied, cache the prefix before
         # the first marker occurrence and send the marker+tail live. If the cache
@@ -296,11 +287,6 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                     tool_config=tool_config,
                 )
                 contents = live_suffix if cached_content_name is not None else prompt
-        elif cache_action == "load" and cache_key:
-            plan = self._plan_load(cache_key, prompt)
-            if plan is not None:
-                cached_content_name, contents = plan
-                cached_lookup_key = cache_key
 
         config_kwargs: dict[str, Any] = {
             **gemini_api_arguments,
@@ -507,27 +493,6 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
 
         return prefix_text, suffix_text
 
-    def _plan_load(self, key: str, prompt: str) -> Optional[tuple[str, str]]:
-        """Resolve a cached prefix for `key` into (cache_name, live_suffix), or
-        None when there's no usable cache: unknown key, within the expiry margin,
-        the prompt no longer starts with the cached prefix, or no live suffix
-        remains. The caller falls back to a full inline request on None."""
-        entry = self._managed_caches.get(key)
-        if entry is None:
-            return None
-
-        name, prefix_text, expiry = entry
-        if expiry - datetime.now(timezone.utc) <= self._CACHE_REUSE_MARGIN:
-            return None
-        if not prompt.startswith(prefix_text):
-            return None
-
-        suffix = prompt[len(prefix_text) :]
-        if not suffix:
-            return None
-
-        return name, suffix
-
     async def _get_or_create_cache(
         self,
         *,
@@ -564,35 +529,6 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
             entry = self._managed_caches.get(lookup_key)
             return entry[0] if entry is not None else None
 
-    async def _store_cache(
-        self,
-        *,
-        key: str,
-        prefix_text: str,
-        ttl_seconds: int,
-        tools: list[google.genai.types.Tool],
-        tool_config: google.genai.types.ToolConfig,
-    ) -> None:
-        """Create (or refresh) an explicit CachedContent holding `prefix_text`
-        plus the output tool, registered under `key` for a later load. Caching is
-        an optimization, so this never raises: a prefix Gemini rejects (e.g. below
-        the token minimum) is remembered and skipped, and a transient failure just
-        leaves the key uncached this turn."""
-        prefix_hash = self._prefix_hash(prefix_text, tools, tool_config)
-
-        async with self._cache_lock:
-            if prefix_hash in self._uncacheable_prefixes:
-                return
-
-            await self._create_cache(
-                display_name=key,
-                prefix_hash=prefix_hash,
-                prefix_text=prefix_text,
-                ttl_seconds=ttl_seconds,
-                tools=tools,
-                tool_config=tool_config,
-            )
-
     async def _create_cache(
         self,
         *,
@@ -620,7 +556,7 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                 f"Gemini rejected schematic caching for key '{display_name}' "
                 f"({exc}); proceeding without caching."
             )
-            self._uncacheable_prefixes.add(prefix_hash)
+            self._uncacheable_prefixes[prefix_hash] = True
             return None
         except Exception as exc:  # noqa: BLE001 - transient: degrade, retry later
             self.logger.warning(
@@ -914,7 +850,7 @@ class GeminiReactGenerator(ReactGenerator):
         self._managed_caches: dict[str, tuple[str, datetime]] = {}
         # Prefix keys we know can't be cached (e.g. below the provider minimum),
         # so we don't re-attempt creation on every call.
-        self._uncacheable_keys: set[str] = set()
+        self._uncacheable_keys: cachetools.LRUCache[str, bool] = cachetools.LRUCache(maxsize=256)
         self._cache_lock = asyncio.Lock()
 
     @property
@@ -1407,7 +1343,7 @@ class GeminiReactGenerator(ReactGenerator):
                     f"Gemini rejected caching for key '{cache_key}' "
                     f"({exc}); proceeding without caching."
                 )
-                self._uncacheable_keys.add(key)
+                self._uncacheable_keys[key] = True
                 return None
             except Exception as exc:  # noqa: BLE001 - transient: degrade, retry later
                 self._logger.warning(

@@ -116,7 +116,7 @@ async def test_that_reviewer_adjusted_reasoning_is_injected_even_without_step_in
     assert any("ask for confirmation first" in m.text for m in state.history)
 
 
-async def test_that_tool_preamble_note_is_only_injected_until_a_message_is_visible() -> None:
+async def test_that_tool_preamble_note_is_injected_initially_and_after_ten_seconds() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
     context.state = ResponseState()
 
@@ -129,14 +129,22 @@ async def test_that_tool_preamble_note_is_only_injected_until_a_message_is_visib
     await loop._update_step_instructions(job, state)
     assert any("Tool communication before tool use" in message.text for message in state.history)
 
-    state.user_visible_message_emitted = True
+    loop._mark_user_visible_message_emitted(state)
     await loop._update_step_instructions(job, state)
     assert not any(
         "Tool communication before tool use" in message.text for message in state.history
     )
 
+    assert state.last_user_visible_message_at is not None
+    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+    await loop._update_step_instructions(job, state)
 
-async def test_that_tool_preamble_note_is_injected_again_after_adjusted_reasoning() -> None:
+    instructions_text = "\n".join(message.text for message in state.history)
+    assert "Tool communication before tool use" in instructions_text
+    assert "More than 10 seconds have passed since your last message" in instructions_text
+
+
+async def test_that_adjusted_reasoning_does_not_override_tool_preamble_interval() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "find flights")])
     context.state = ResponseState(step_notes="Ask for the missing airport before searching.")
 
@@ -147,14 +155,14 @@ async def test_that_tool_preamble_note_is_injected_again_after_adjusted_reasonin
     state = _LoopState(
         history=history,
         instructions_index=instructions_index,
-        user_visible_message_emitted=True,
     )
+    loop._mark_user_visible_message_emitted(state)
 
     await loop._update_step_instructions(job, state)
 
     instructions_text = "\n".join(message.text for message in state.history)
     assert "Ask for the missing airport before searching." in instructions_text
-    assert "Tool communication before tool use" in instructions_text
+    assert "Tool communication before tool use" not in instructions_text
 
 
 async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message() -> None:
@@ -176,6 +184,8 @@ async def test_that_a_restarted_step_finalizes_and_resets_the_streamed_message()
     assert state.in_the_middle_of_running_tools is False
 
     context.state.step_notes = "Ask for confirmation instead of calling the tool."
+    assert state.last_user_visible_message_at is not None
+    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
 
     # The retry's text starts a NEW message, not appended to the rejected preamble.
     await loop._update_message(context, state, TextDelta(text="Actually, here's the answer."))
@@ -224,7 +234,8 @@ async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_co
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()
-    state = _LoopState(user_visible_message_emitted=True)
+    state = _LoopState()
+    loop._mark_user_visible_message_emitted(state)
 
     tool_call = ToolCallPart(id="call-1", name="search_flights")
     result = StepResult(
@@ -250,4 +261,43 @@ async def test_that_subsequent_streamed_tool_preambles_are_suppressed_and_not_co
 
     assert message_events == []
     assert state.history[-1].text == ""
+    assert state.history[-1].tool_calls == [tool_call]
+
+
+async def test_that_streamed_tool_preambles_are_allowed_after_ten_seconds() -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
+    context.state = ResponseState()
+    loop = _make_streaming_loop()
+    state = _LoopState()
+    loop._mark_user_visible_message_emitted(state)
+    assert state.last_user_visible_message_at is not None
+    state.last_user_visible_message_at -= loop._TOOL_PREAMBLE_INTERVAL_SECONDS + 1
+
+    tool_call = ToolCallPart(id="call-1", name="search_flights")
+    result = StepResult(
+        message=Message(
+            role=Role.ASSISTANT,
+            parts=[TextPart(text="I'll check another airport."), tool_call],
+        ),
+        finish_reason=FinishReason.TOOL_CALLS,
+        usage=Usage(),
+    )
+
+    events = [
+        TextDelta(text="I'll check another airport."),
+        ToolCallStarted(id="call-1", name="search_flights"),
+        StepCompleted(result=result),
+    ]
+    for event in events:
+        await loop._update_message(context, state, event)
+        await loop._commit_new_event(state, event)
+
+    emitter = cast(EventBuffer, context.session_event_emitter)
+    message_events = [e for e in emitter.events if e.kind == EventKind.MESSAGE]
+
+    assert len(message_events) == 1
+    assert cast(dict[str, Any], message_events[0].data)["message"] == (
+        "I'll check another airport."
+    )
+    assert state.history[-1].text == "I'll check another airport."
     assert state.history[-1].tool_calls == [tool_call]

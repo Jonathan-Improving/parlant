@@ -34,7 +34,7 @@ class StreamingLoop(BaseLoop):
         match event:
             case TextDelta(text=text):
                 if state.message_handle is None:  # First message chunk
-                    if not self._can_emit_tool_preamble(context, state):
+                    if not self._additional_preamble_is_needed(state):
                         if state.message_buffer is None:
                             state.message_buffer = StringIO()
                             state.message_chunks = []
@@ -62,7 +62,7 @@ class StreamingLoop(BaseLoop):
                             chunks=state.message_chunks,
                         ),
                     )
-                    state.user_visible_message_emitted = True
+                    self._mark_user_visible_message_emitted(state)
                 else:  # Subsequent message chunk
                     assert state.message_buffer is not None
 
@@ -95,10 +95,12 @@ class StreamingLoop(BaseLoop):
                 )
 
                 state.emitted_message_len += len(buffered)
+                state.allowed_tool_message_text_len = state.emitted_message_len
                 state.message_buffer = None
                 state.message_chunks = []
                 state.message_handle = None
             case ToolCallStarted() if state.message_buffer is not None:
+                state.allowed_tool_message_text_len = 0
                 state.suppress_current_tool_message_text = bool(state.message_buffer.getvalue())
                 state.message_buffer = None
                 state.message_chunks = []
@@ -123,10 +125,17 @@ class StreamingLoop(BaseLoop):
                     state.message_buffer = None
                     state.message_chunks = []
                     state.message_handle = None
+                    if result.needs_tools:
+                        state.allowed_tool_message_text_len = len(result.message.text)
                     state.emitted_message_len = 0
 
                     await self._complete_message_step(context, result)
-                elif result.needs_tools and not self._can_emit_tool_preamble(context, state):
+                elif result.needs_tools and state.allowed_tool_message_text_len is not None:
+                    state.message_buffer = None
+                    state.message_chunks = []
+                    state.emitted_message_len = 0
+                elif result.needs_tools and not self._additional_preamble_is_needed(state):
+                    state.allowed_tool_message_text_len = 0
                     state.suppress_current_tool_message_text = bool(result.message.text)
                     state.message_buffer = None
                     state.message_chunks = []
@@ -144,7 +153,9 @@ class StreamingLoop(BaseLoop):
                             chunks=[remaining, None],
                         ),
                     )
-                    state.user_visible_message_emitted = True
+                    self._mark_user_visible_message_emitted(state)
+                    if result.needs_tools:
+                        state.allowed_tool_message_text_len = len(remaining)
 
                     state.emitted_message_len = 0
 

@@ -52,7 +52,8 @@ class BlockingLoop(BaseLoop):
                 # onto it.
                 buffered = state.message_buffer.getvalue()
 
-                if not self._can_emit_tool_preamble(context, state):
+                if not self._additional_preamble_is_needed(state):
+                    state.allowed_tool_message_text_len = 0
                     state.suppress_current_tool_message_text = bool(buffered)
                     state.message_buffer = None
                     return
@@ -67,8 +68,9 @@ class BlockingLoop(BaseLoop):
                             ),
                         ),
                     )
-                    state.user_visible_message_emitted = True
+                    self._mark_user_visible_message_emitted(state)
                     state.emitted_message_len += len(buffered)
+                    state.allowed_tool_message_text_len = state.emitted_message_len
 
                 state.message_buffer = None
             case StepCompleted(result=result):
@@ -78,7 +80,13 @@ class BlockingLoop(BaseLoop):
                 # keeps it correct even if a provider delivered text outside the deltas.
                 remaining = result.message.text[state.emitted_message_len :]
 
-                if result.needs_tools and not self._can_emit_tool_preamble(context, state):
+                if result.needs_tools and state.allowed_tool_message_text_len is not None:
+                    state.message_buffer = None
+                    state.emitted_message_len = 0
+                    return
+
+                if result.needs_tools and not self._additional_preamble_is_needed(state):
+                    state.allowed_tool_message_text_len = 0
                     state.suppress_current_tool_message_text = bool(result.message.text)
                     state.message_buffer = None
                     state.emitted_message_len = 0
@@ -94,7 +102,9 @@ class BlockingLoop(BaseLoop):
                             ),
                         ),
                     )
-                    state.user_visible_message_emitted = True
+                    self._mark_user_visible_message_emitted(state)
+                    if result.needs_tools:
+                        state.allowed_tool_message_text_len = len(remaining)
 
                 state.message_buffer = None
                 state.emitted_message_len = 0
