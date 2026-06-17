@@ -37,7 +37,7 @@ from lagom import Container
 
 from parlant.adapters.nlp.anthropic_service import (
     ANTHROPIC_BLOCK_KEY,
-    TURN_INSTRUCTIONS_OPEN,
+    SYSTEM_UPDATE_TOOL_NAME,
     AnthropicReactGenerator,
     AnthropicService,
 )
@@ -98,7 +98,6 @@ def anthropic(logger: Logger) -> AnthropicReactGenerator:
 def test_that_encode_maps_roles_and_system(anthropic: AnthropicReactGenerator) -> None:
     history = [
         Message(role=Role.SYSTEM, parts=[TextPart(text="You are a test agent.")]),
-        Message(role=Role.SYSTEM, parts=[TextPart(text="Extra system rule.")]),
         Message(role=Role.USER, parts=[TextPart(text="hi")]),
         Message(role=Role.ASSISTANT, parts=[TextPart(text="hello")]),
         Message(
@@ -109,9 +108,10 @@ def test_that_encode_maps_roles_and_system(anthropic: AnthropicReactGenerator) -
 
     request = anthropic._encode(history, [], "auto", reasoning=ReasoningConfig())
 
-    # System messages fold into the top-level system parameter.
+    # The leading system prompt folds into the top-level system parameter. (A
+    # subsequent system message is dynamic and delivered separately — see the
+    # mid-conversation system tests.)
     assert "You are a test agent." in request["system"]
-    assert "Extra system rule." in request["system"]
 
     messages = request["messages"]
     # user, assistant, and tool-result-as-user (Anthropic puts tool_result in user)
@@ -284,12 +284,13 @@ def test_that_a_mid_conversation_system_message_is_inline_on_opus_4_8(logger: Lo
     }
 
 
-def test_that_a_mid_conversation_system_message_rides_the_last_user_message_on_haiku(
+def test_that_a_mid_conversation_system_message_becomes_a_synthetic_tool_result_on_haiku(
     anthropic: AnthropicReactGenerator,
 ) -> None:
-    # Haiku 4.5 has no inline system support, so a mid-conversation system message
-    # is appended (wrapped) to the END of the last user message instead of folded
-    # into the system block — keeping the system prompt stable and cacheable.
+    # Haiku 4.5 has no inline system support, so a mid-conversation system message is
+    # delivered as a synthetic `system_update` tool_use/tool_result pair appended after
+    # the conversation (not folded into the system block, not echoed as user text) —
+    # so the model treats it as fetched system guidance, and the system stays cacheable.
     history = [
         Message(role=Role.SYSTEM, parts=[TextPart(text="main")]),
         Message(role=Role.USER, parts=[TextPart(text="hi")]),
@@ -298,15 +299,24 @@ def test_that_a_mid_conversation_system_message_rides_the_last_user_message_on_h
 
     request = anthropic._encode(history, [], "auto", reasoning=ReasoningConfig())
 
-    # No system-role messages; the leading system carries the protocol note.
+    # No system-role messages; the leading system carries the protocol note that
+    # declares the system_update convention.
     assert all(m["role"] != "system" for m in request["messages"])
     assert request["system"].startswith("main")
-    assert "ADDITIONAL RESPONSE CONSIDERATIONS" in request["system"]
-    # The mid-conversation instruction rides, wrapped, at the end of the user turn.
-    last_user = request["messages"][-1]
-    assert last_user["role"] == "user"
-    assert last_user["content"][-1]["text"].startswith(TURN_INSTRUCTIONS_OPEN)
-    assert "mid" in last_user["content"][-1]["text"]
+    assert SYSTEM_UPDATE_TOOL_NAME in request["system"]
+
+    # The mid-conversation instruction arrives as a synthetic tool_use + tool_result.
+    tool_use_msg, tool_result_msg = request["messages"][-2], request["messages"][-1]
+    assert tool_use_msg["role"] == "assistant"
+    tool_use = tool_use_msg["content"][0]
+    assert tool_use["type"] == "tool_use" and tool_use["name"] == SYSTEM_UPDATE_TOOL_NAME
+    assert tool_result_msg["role"] == "user"
+    tool_result = tool_result_msg["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == tool_use["id"]
+    assert "mid" in tool_result["content"]
+    # The user's own message is untouched (not carrying the instruction).
+    assert request["messages"][0] == {"role": "user", "content": [{"type": "text", "text": "hi"}]}
 
 
 def test_that_an_inline_mid_conversation_system_is_not_a_cache_breakpoint(logger: Logger) -> None:
@@ -343,8 +353,9 @@ def test_that_a_mid_conversation_system_keeps_the_system_a_single_cached_block(
     anthropic: AnthropicReactGenerator,
 ) -> None:
     # With caching on, the mid-conversation instruction must NOT enter the system
-    # block (which stays one cached block) — it rides at the tail of the last user
-    # message, past the cache breakpoint, so the cached prefix is unaffected.
+    # block (which stays one cached block) — it arrives as a synthetic tool_use/
+    # tool_result pair appended past the cache breakpoint, so the cached prefix is
+    # unaffected.
     history = [
         Message(role=Role.SYSTEM, parts=[TextPart(text="main")], cache_key="s"),
         Message(role=Role.USER, parts=[TextPart(text="hi")], cache_key="s"),
@@ -357,15 +368,17 @@ def test_that_a_mid_conversation_system_keeps_the_system_a_single_cached_block(
     assert len(request["system"]) == 1
     assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert request["system"][0]["text"].startswith("main")
-    assert "ADDITIONAL RESPONSE CONSIDERATIONS" in request["system"][0]["text"]
+    assert SYSTEM_UPDATE_TOOL_NAME in request["system"][0]["text"]
     # The breakpoint stays on the user message's real content...
-    last_user = request["messages"][-1]
-    assert last_user["role"] == "user"
-    assert "cache_control" in last_user["content"][0]
-    # ...and the wrapped instruction is appended after it, uncached.
-    assert last_user["content"][-1]["text"].startswith(TURN_INSTRUCTIONS_OPEN)
-    assert "cache_control" not in last_user["content"][-1]
-    assert "mid" in last_user["content"][-1]["text"]
+    assert request["messages"][0]["role"] == "user"
+    assert "cache_control" in request["messages"][0]["content"][0]
+    # ...and the instruction rides the synthetic tool_result after it, uncached.
+    tool_result_msg = request["messages"][-1]
+    assert tool_result_msg["role"] == "user"
+    tool_result = tool_result_msg["content"][0]
+    assert tool_result["type"] == "tool_result"
+    assert "cache_control" not in tool_result
+    assert "mid" in tool_result["content"]
 
 
 def test_that_prefill_request_appends_an_uncached_dummy_and_caps_output(
@@ -419,7 +432,14 @@ async def test_that_a_short_prefix_is_not_prefilled(anthropic: AnthropicReactGen
     # is well below the cache minimum.
     history = [Message(role=Role.SYSTEM, parts=[TextPart(text="be concise")])]
 
-    assert await anthropic._should_prefill(history, [], {}) is False
+    # Thinking disabled so the size gate (not the thinking short-circuit) decides:
+    # a tiny prompt is well below the cache minimum.
+    assert (
+        await anthropic._should_prefill(
+            history, [], {}, reasoning=ReasoningConfig(effort="minimal")
+        )
+        is False
+    )
 
 
 async def test_that_a_prefix_above_the_cache_minimum_is_prefilled(
@@ -427,7 +447,15 @@ async def test_that_a_prefix_above_the_cache_minimum_is_prefilled(
 ) -> None:
     history = [Message(role=Role.SYSTEM, parts=[TextPart(text="word " * 4000)])]
 
-    assert await anthropic._should_prefill(history, [], {}) is True
+    # Prefill warms a cache the real call can reuse, which only pays off when that
+    # call won't think (a thinking prefill would run a full thinking pass). So the
+    # size gate is only reachable with thinking disabled.
+    assert (
+        await anthropic._should_prefill(
+            history, [], {}, reasoning=ReasoningConfig(effort="minimal")
+        )
+        is True
+    )
 
 
 def test_that_visibility_maps_to_the_display_knob(anthropic: AnthropicReactGenerator) -> None:
