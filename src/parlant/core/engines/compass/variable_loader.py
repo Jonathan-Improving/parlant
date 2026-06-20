@@ -17,6 +17,7 @@ from typing import Optional
 
 from croniter import croniter
 
+from parlant.core.async_utils import safe_gather
 from parlant.core.agents import AgentId
 from parlant.core.context_variables import (
     ContextVariable,
@@ -52,8 +53,6 @@ class VariableLoader:
             )
         )
 
-        result = []
-
         keys_to_check_in_order_of_importance = (
             [context.customer.id]
             + [f"tag:{tag_id}" for tag_id in context.customer.tags]
@@ -61,18 +60,22 @@ class VariableLoader:
             + [ContextVariableStore.GLOBAL_KEY]
         )
 
-        # TODO: Parallelize this, as some tool-enabled context vars
-        # might run long-running tasks. One example we've encountered
-        # is analyzing an image and putting the analysis into a variable.
-        for variable in variables_supported_by_agent:
+        async def load_variable(
+            variable: ContextVariable,
+        ) -> Optional[tuple[ContextVariable, ContextVariableValue]]:
             # Try keys in order of importance, stopping at and using
             # the first (and most important) set key for each variable.
             for key in keys_to_check_in_order_of_importance:
                 if value := await self._load_context_variable_value(context, variable, key):
-                    result.append((variable, value))
-                    break
+                    return (variable, value)
 
-        return result
+            return None
+
+        loaded_values = await safe_gather(
+            *[load_variable(variable) for variable in variables_supported_by_agent]
+        )
+
+        return [loaded for loaded in loaded_values if loaded]
 
     async def _load_context_variable_value(
         self,

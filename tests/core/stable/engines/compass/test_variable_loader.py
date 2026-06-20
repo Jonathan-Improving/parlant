@@ -15,6 +15,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
+import asyncio
 
 import pytest
 
@@ -89,11 +90,15 @@ class _FakeEntityQueries:
         variables: list[ContextVariable],
         values: dict[tuple[ContextVariableId, str], ContextVariableValue],
         services: dict[str, _FakeToolService] | None = None,
+        delay_reads: bool = False,
     ) -> None:
         self.variables = variables
         self.values = values
         self.services = services or {}
+        self.delay_reads = delay_reads
         self.value_reads: list[tuple[ContextVariableId, str]] = []
+        self.active_value_reads = 0
+        self.max_active_value_reads = 0
 
     async def find_context_variables_for_context(
         self,
@@ -106,6 +111,15 @@ class _FakeEntityQueries:
         variable_id: ContextVariableId,
         key: str,
     ) -> Optional[ContextVariableValue]:
+        if self.delay_reads:
+            self.active_value_reads += 1
+            self.max_active_value_reads = max(
+                self.max_active_value_reads,
+                self.active_value_reads,
+            )
+            await asyncio.sleep(0.01)
+            self.active_value_reads -= 1
+
         self.value_reads.append((variable_id, key))
         return self.values.get((variable_id, key))
 
@@ -202,6 +216,32 @@ async def test_that_loader_skips_variable_when_no_key_has_a_value() -> None:
         (variable.id, Tag.for_agent_id(context.agent.id).id),
         (variable.id, ContextVariableStore.GLOBAL_KEY),
     ]
+
+
+@pytest.mark.asyncio
+async def test_that_loader_loads_multiple_variables_concurrently() -> None:
+    first_variable = _variable("first")
+    second_variable = _variable("second")
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hello")])
+    context.state = ResponseState(agent_effort=context.agent.effort)
+
+    queries = _FakeEntityQueries(
+        variables=[first_variable, second_variable],
+        values={
+            (first_variable.id, context.customer.id): _value("first-value"),
+            (second_variable.id, context.customer.id): _value("second-value"),
+        },
+        delay_reads=True,
+    )
+    commands = _FakeEntityCommands()
+
+    loaded = await _loader(queries, commands).load(context)
+
+    assert loaded == [
+        (first_variable, _value("first-value")),
+        (second_variable, _value("second-value")),
+    ]
+    assert queries.max_active_value_reads == 2
 
 
 @pytest.mark.asyncio
