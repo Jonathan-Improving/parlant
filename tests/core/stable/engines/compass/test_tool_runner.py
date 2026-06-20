@@ -22,7 +22,8 @@ from parlant.core.common import JSONSerializable
 from parlant.core.engines.engine_context import EngineContext
 from parlant.core.engines.compass.tool_runner import ToolRunner
 from parlant.core.entity_cq import EntityQueries
-from parlant.core.loggers import StdoutLogger
+from parlant.core.loggers import Logger, StdoutLogger
+from parlant.core.nlp.tokenization import ZeroEstimatingTokenizer
 from parlant.core.tools import ToolContext, ToolId, ToolResult
 from parlant.core.tracer import LocalTracer
 
@@ -30,6 +31,9 @@ from parlant.core.tracer import LocalTracer
 class _FakeService:
     def __init__(self, behavior: Callable[[str, Mapping[str, Any]], ToolResult]) -> None:
         self._behavior = behavior
+
+    async def resolve_tool(self, name: str, context: ToolContext) -> Any:
+        return SimpleNamespace(narration=None)
 
     async def call_tool(
         self, name: str, context: ToolContext, arguments: Mapping[str, Any]
@@ -56,12 +60,16 @@ def _engine_context() -> EngineContext:
     )
 
 
-def _runner(service: _FakeService) -> ToolRunner:
+def _runner(
+    service: _FakeService,
+    logger: Logger | None = None,
+) -> ToolRunner:
     tracer = LocalTracer()
     return ToolRunner(
-        StdoutLogger(tracer),
+        logger or StdoutLogger(tracer),
         tracer,
         cast(EntityQueries, _FakeEntityQueries(service)),
+        ZeroEstimatingTokenizer(),
     )
 
 

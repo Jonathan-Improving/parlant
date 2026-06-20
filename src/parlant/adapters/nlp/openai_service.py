@@ -1261,7 +1261,7 @@ class OpenAIReactGenerator(ReactGenerator):
         return FinishReason.STOP
 
 
-class OpenAIService(NLPService):
+class OpenAIService(NLPService, EstimatingTokenizer):
     @staticmethod
     def verify_environment() -> str | None:
         """Returns an error message if the environment is not set up correctly."""
@@ -1288,6 +1288,10 @@ Please set OPENAI_API_KEY in your environment before running Parlant.
         self._health_reporter = health_reporter
 
         self._logger.info("Initialized OpenAIService")
+
+    @override
+    async def estimate_token_count(self, prompt: str) -> int:
+        return len(tiktoken.get_encoding("o200k_base").encode(prompt))
 
     @property
     @override

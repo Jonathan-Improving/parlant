@@ -29,6 +29,7 @@ from typing_extensions import override
 import jsonfinder  # type: ignore
 import json
 import os
+import tiktoken
 
 from parlant.adapters.nlp.common import normalize_json_output, record_llm_metrics
 from parlant.adapters.nlp.hugging_face import JinaAIEmbedder
@@ -999,7 +1000,7 @@ class AnthropicReactGenerator(ReactGenerator):
         return FinishReason.STOP
 
 
-class AnthropicService(NLPService):
+class AnthropicService(NLPService, EstimatingTokenizer):
     @staticmethod
     def verify_environment() -> str | None:
         """Returns an error message if the environment is not set up correctly."""
@@ -1022,6 +1023,10 @@ Please set ANTHROPIC_API_KEY in your environment before running Parlant.
         self._health_reporter = health_reporter
 
         self.logger.info("Initialized AnthropicService")
+
+    @override
+    async def estimate_token_count(self, prompt: str) -> int:
+        return len(tiktoken.get_encoding("o200k_base").encode(prompt))
 
     @property
     @override

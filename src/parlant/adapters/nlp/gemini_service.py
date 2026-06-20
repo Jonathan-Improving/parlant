@@ -28,6 +28,7 @@ from google.api_core.exceptions import NotFound, TooManyRequests, ResourceExhaus
 from google.genai.errors import APIError, ClientError, ServerError as GenaiServerError
 import google.genai  # type: ignore
 import google.genai.types  # type: ignore
+import tiktoken
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
 from typing import Any, AsyncIterator, Literal, Mapping, Optional, Sequence, Union, cast
 from typing_extensions import get_args, get_origin, override
@@ -1546,7 +1547,7 @@ class GeminiTextEmbedding_001(GoogleEmbedder):
         return 3072
 
 
-class GeminiService(NLPService):
+class GeminiService(NLPService, EstimatingTokenizer):
     @staticmethod
     def verify_environment() -> str | None:
         """Returns an error message if the environment is not set up correctly."""
@@ -1573,6 +1574,10 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
         self._health_reporter = health_reporter
 
         self.logger.info("Initialized GeminiService")
+
+    @override
+    async def estimate_token_count(self, prompt: str) -> int:
+        return len(tiktoken.get_encoding("o200k_base").encode(prompt))
 
     @property
     @override

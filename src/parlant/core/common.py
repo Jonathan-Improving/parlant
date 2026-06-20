@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 from collections import defaultdict
 from enum import Enum
+import os
 import xxhash
 
 from typing import (
@@ -37,6 +38,16 @@ import nanoid  # type: ignore
 from pydantic import BaseModel, ConfigDict
 import semver
 
+
+DISABLE_WARNINGS = os.getenv("PARLANT_WARNINGS", "1") in (
+    "0",
+    "false",
+    "False",
+    "no",
+    "No",
+    "n",
+    "N",
+)
 
 _ClassPropertyReturnType = TypeVar("_ClassPropertyReturnType")
 

@@ -30,7 +30,7 @@ from parlant.core.engines.compass.preambles import (
     PreambleConfiguration,
 )
 from parlant.core.engines.compass.response_state import ResponseState
-from parlant.core.loggers import StdoutLogger
+from parlant.core.loggers import Logger, StdoutLogger
 from parlant.core.nlp.react import (
     FinishReason,
     Message,
@@ -54,11 +54,11 @@ from tests.core.stable.engines.compass.guideline_matching.utils import (
 )
 
 
-def _make_blocking_loop() -> BlockingLoop:
+def _make_blocking_loop(logger: Logger | None = None) -> BlockingLoop:
     # _surface_message_event only touches the session event emitter and the loop state,
     # so the heavier collaborators aren't exercised here.
     tracer = LocalTracer()
-    logger = StdoutLogger(tracer)
+    logger = logger or StdoutLogger(tracer)
 
     return BlockingLoop(
         logger=logger,
@@ -258,7 +258,6 @@ async def test_that_tool_call_step_is_committed_before_tool_results_are_appended
     assert state.history[0].tool_calls == [tool_call]
     assert state.history[1].tool_results[0].content == {"ok": True}
     assert state.steps == [result]
-
 
 async def test_that_blocking_loop_emits_a_single_complete_message_event_without_chunks() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])

@@ -156,7 +156,7 @@ from parlant.core.nlp.generation import (
     SchematicGenerationResult,
     SchematicGenerator,
 )
-from parlant.core.nlp.tokenization import EstimatingTokenizer
+from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.persistence.common import ObjectId
 from parlant.core.persistence.document_database import DocumentDatabase, identity_loader_for
 from parlant.core.relationships import (
@@ -5582,6 +5582,11 @@ class Server:
                 latest_container = await self._configure_container(latest_container.clone())
 
             c[NLPService] = self._nlp_service_func(c)
+            c[EstimatingTokenizer] = (
+                c[NLPService]
+                if isinstance(c[NLPService], EstimatingTokenizer)
+                else ZeroEstimatingTokenizer()
+            )
 
             await override_stores_with_transient_versions(get_latest_container)
 

@@ -51,6 +51,7 @@ from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_next_
     JourneyNextStepSelectionSchema,
 )
 from parlant.core.meter import Meter, LocalMeter
+from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.services.indexing.journey_reachable_nodes_evaluation import (
     ReachableNodesEvaluationSchema,
 )
@@ -420,6 +421,11 @@ async def container(
         )
 
         container[NLPService] = await container[ServiceRegistry].read_nlp_service("default")
+        container[EstimatingTokenizer] = (
+            container[NLPService]
+            if isinstance(container[NLPService], EstimatingTokenizer)
+            else ZeroEstimatingTokenizer()
+        )
 
         async def get_embedder_type() -> type[Embedder]:
             return type(await container[NLPService].get_embedder())

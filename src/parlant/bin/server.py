@@ -176,6 +176,7 @@ from parlant.core.services.indexing.tool_running_action_detector import (
 )
 from parlant.core.canned_responses import CannedResponseStore, CannedResponseVectorStore
 from parlant.core.nlp.service import NLPService
+from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.persistence.common import MigrationRequired, ServerOutdated
 from parlant.core.shots import ShotCollection
 from parlant.core.tags import TagDocumentStore, TagStore
@@ -892,6 +893,12 @@ async def initialize_container(
         await try_define_func(ServiceRegistry, make_service_document_registry)
 
         try_define(NLPService, nlp_service_instance)
+        try_define(
+            EstimatingTokenizer,
+            nlp_service_instance
+            if isinstance(nlp_service_instance, EstimatingTokenizer)
+            else ZeroEstimatingTokenizer(),
+        )
 
         embedder_factory = EmbedderFactory(c)
 

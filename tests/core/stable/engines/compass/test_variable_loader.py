@@ -33,6 +33,8 @@ from parlant.core.engines.compass.variable_loader import (
     VariableLoader,
     load_fresh_context_variable_value,
 )
+from parlant.core.loggers import Logger
+from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.sessions import EventSource
 from parlant.core.tags import Tag, TagId
 from parlant.core.tools import ToolContext, ToolId, ToolResult
@@ -144,11 +146,14 @@ class _FakeEntityCommands:
 def _loader(
     queries: _FakeEntityQueries,
     commands: _FakeEntityCommands,
+    logger: Logger | None = None,
+    tokenizer: EstimatingTokenizer | None = None,
 ) -> VariableLoader:
     return VariableLoader(
-        logger=StdoutLogger(LocalTracer()),
+        logger=logger or StdoutLogger(LocalTracer()),
         entity_queries=queries,  # type: ignore[arg-type]
         entity_commands=commands,  # type: ignore[arg-type]
+        estimating_tokenizer=tokenizer or ZeroEstimatingTokenizer(),
     )
 
 

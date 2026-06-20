@@ -17,10 +17,11 @@ from collections.abc import Mapping
 import json
 import os
 
-from parlant.core.common import JSONSerializable
+from parlant.core.common import DISABLE_WARNINGS, JSONSerializable
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
+from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.sessions import StatusEventData
 from parlant.core.tools import ToolContext, ToolId, ToolResult, ToolService, pick_narration
 from parlant.core.tracer import Tracer
@@ -35,10 +36,17 @@ class ToolRunner:
     captured into an error ToolResult rather than raised, so the loop can feed them
     back to the model like any other result."""
 
-    def __init__(self, logger: Logger, tracer: Tracer, entity_queries: EntityQueries) -> None:
+    def __init__(
+        self,
+        logger: Logger,
+        tracer: Tracer,
+        entity_queries: EntityQueries,
+        estimating_tokenizer: EstimatingTokenizer,
+    ) -> None:
         self._logger = logger
         self._tracer = tracer
         self._entity_queries = entity_queries
+        self._estimating_tokenizer = estimating_tokenizer
 
     async def run_tool(
         self,
@@ -80,6 +88,8 @@ class ToolRunner:
             self._logger.debug(
                 f"Tool {tool.to_string()} completed with result {json.dumps(result.data, indent=2)}"
             )
+
+            await self._warn_if_result_is_large(tool, result)
 
             return result
         except asyncio.TimeoutError:
@@ -131,3 +141,34 @@ class ToolRunner:
                 f"Invalid PARLANT_TOOL_TIMEOUT={raw!r}; using default {DEFAULT_TOOL_TIMEOUT}s"
             )
             return DEFAULT_TOOL_TIMEOUT
+
+    async def _warn_if_result_is_large(self, tool: ToolId, result: ToolResult) -> None:
+        if DISABLE_WARNINGS:
+            return
+
+        lifespan = result.control.get("lifespan", "session")
+        threshold = 2_000 if lifespan == "response" else 1_000
+
+        token_count = await self._estimating_tokenizer.estimate_token_count(
+            stringify_tool_result(result.data)
+        )
+
+        if token_count <= threshold:
+            return
+
+        if lifespan == "response":
+            suggestion = "Consider compacting it."
+        else:
+            suggestion = 'Consider compacting it, or setting ToolResult(control={"lifespan": "response"}) to avoid excessive token accumulation throughout the session.'
+
+        self._logger.warning(
+            f"Tool {tool.to_string()} returned a {lifespan}-lifespan result with "
+            f"{token_count} tokens. {suggestion}"
+        )
+
+
+def stringify_tool_result(output: object) -> str:
+    try:
+        return json.dumps(output, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(output)

@@ -13,12 +13,14 @@
 # limitations under the License.
 
 from datetime import datetime, timezone
+import json
 from typing import Optional
 
 from croniter import croniter
 
 from parlant.core.async_utils import safe_gather
 from parlant.core.agents import AgentId
+from parlant.core.common import DISABLE_WARNINGS
 from parlant.core.context_variables import (
     ContextVariable,
     ContextVariableStore,
@@ -27,6 +29,7 @@ from parlant.core.context_variables import (
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.entity_cq import EntityCommands, EntityQueries
 from parlant.core.loggers import Logger
+from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.sessions import Session
 from parlant.core.tags import Tag
 from parlant.core.tools import ToolContext
@@ -38,10 +41,12 @@ class VariableLoader:
         logger: Logger,
         entity_queries: EntityQueries,
         entity_commands: EntityCommands,
+        estimating_tokenizer: EstimatingTokenizer,
     ) -> None:
         self._logger = logger
         self._entity_queries = entity_queries
         self._entity_commands = entity_commands
+        self._estimating_tokenizer = estimating_tokenizer
 
     async def load(
         self,
@@ -83,7 +88,7 @@ class VariableLoader:
         variable: ContextVariable,
         key: str,
     ) -> Optional[ContextVariableValue]:
-        return await load_fresh_context_variable_value(
+        value = await load_fresh_context_variable_value(
             entity_queries=self._entity_queries,
             entity_commands=self._entity_commands,
             agent_id=context.agent.id,
@@ -91,6 +96,27 @@ class VariableLoader:
             variable=variable,
             key=key,
         )
+
+        if (not DISABLE_WARNINGS) and variable.tool_id and value:
+            token_count = await self._estimating_tokenizer.estimate_token_count(
+                stringify_variable_output(value.data)
+            )
+
+            if token_count > 1_000:
+                self._logger.warning(
+                    f"Tool-enabled context variable '{variable.name}' produced "
+                    f"{token_count} tokens for key '{key}'. Consider compacting it "
+                    "or using a tool with a response-lifetime result instead."
+                )
+
+        return value
+
+
+def stringify_variable_output(output: object) -> str:
+    try:
+        return json.dumps(output, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(output)
 
 
 async def load_fresh_context_variable_value(
