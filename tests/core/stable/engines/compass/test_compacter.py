@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, cast
-import asyncio
 
 import pytest
 
@@ -102,22 +101,6 @@ class _FakeCompactionGenerator(SchematicGenerator[CompactionSchema]):
     @property
     def tokenizer(self) -> EstimatingTokenizer:
         return self._tokenizer
-
-
-class _BlockingCompactionGenerator(_FakeCompactionGenerator):
-    def __init__(self, token_count: int, summary: str) -> None:
-        super().__init__(token_count=token_count, summary=summary)
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def generate(
-        self,
-        prompt: str | PromptBuilder,
-        hints: Mapping[str, Any] = {},
-    ) -> SchematicGenerationResult[CompactionSchema]:
-        self.started.set()
-        await self.release.wait()
-        return await super().generate(prompt, hints)
 
 
 class _FakeEntityQueries:
@@ -437,47 +420,3 @@ async def test_compact_if_needed_does_not_emit_when_below_threshold() -> None:
 
     assert generator.prompts == []
     assert context.session_event_emitter.events == []  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_suppresses_cancellation_after_compaction_starts() -> None:
-    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "old message")])
-    context.state = ResponseState(agent_effort=context.agent.effort)
-
-    persisted_events = [
-        *context.interaction.events,
-        create_event_message(1, EventSource.AI_AGENT, "current response"),
-    ]
-    generator = _BlockingCompactionGenerator(
-        token_count=10,
-        summary="summary emitted despite cancellation",
-    )
-    compacter = _compacter(generator)
-    compacter.set_policy(_policy(threshold=1))
-
-    tracer = LocalTracer()
-    engine = CompassEngine(
-        logger=StdoutLogger(tracer),
-        tracer=tracer,
-        meter=cast(Any, object()),
-        matcher=cast(Any, object()),
-        responder=cast(Any, object()),
-        compacter=compacter,
-        entity_queries=cast(Any, _FakeEntityQueries(persisted_events)),
-        hooks=cast(Any, object()),
-    )
-
-    task = asyncio.create_task(
-        engine._compact_if_needed(context)  # pyright: ignore[reportPrivateUsage]
-    )
-    await generator.started.wait()
-    task.cancel()
-    generator.release.set()
-    await task
-
-    emitted_events = context.session_event_emitter.events  # type: ignore[attr-defined]
-    assert emitted_events[-1].source == EventSource.SYSTEM
-    assert emitted_events[-1].kind == EventKind.MESSAGE
-    assert cast(dict[str, Any], emitted_events[-1].data)["message"] == (
-        "summary emitted despite cancellation"
-    )

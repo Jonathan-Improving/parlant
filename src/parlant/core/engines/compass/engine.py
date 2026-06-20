@@ -265,23 +265,16 @@ class CompassEngine(Engine):
                 data=StatusEventData(status="processing", message="Compacting session"),
             )
 
-            async def compact_session(latch: CancellationSuppressionLatch[None]) -> None:
-                latch.enable()
+            result = await self._compacter.compact(context)
+            context.state.session_summary = result.summary
 
-                result = await self._compacter.compact(context)
-                context.state.session_summary = result.summary
+            self._logger.debug(f"Compacted session {context.session.id}: {result.generation_info}")
 
-                self._logger.debug(
-                    f"Compacted session {context.session.id}: {result.generation_info}"
-                )
-
-                await context.session_event_emitter.emit_system_message_event(
-                    trace_id=self._tracer.trace_id,
-                    data=result.summary,
-                    metadata={"source": "compacter"},
-                )
-
-            await latched_shield(compact_session)
+            await context.session_event_emitter.emit_system_message_event(
+                trace_id=self._tracer.trace_id,
+                data=result.summary,
+                metadata={"source": "compacter"},
+            )
         except Exception as exc:
             self._logger.error(
                 "Session compaction failed after response generation: "
