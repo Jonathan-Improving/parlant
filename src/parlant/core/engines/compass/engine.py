@@ -252,28 +252,36 @@ class CompassEngine(Engine):
         return cast(MessageEventData, event.data)["message"]
 
     async def _compact_if_needed(self, context: EngineContext) -> None:
-        # Runs inside `process`'s post-response uncancellable finalization, so it
-        # doesn't shield itself; it only guards against errors so a compaction failure
-        # can't fail the turn whose response already went out.
+        # Guard against errors so a compaction failure can't fail the turn whose
+        # response already went out.
         try:
             if not await self._compacter.needs_compaction(context):
                 return
+
+            await self._refresh_interaction_history(context)
 
             await context.session_event_emitter.emit_status_event(
                 trace_id=self._tracer.trace_id,
                 data=StatusEventData(status="processing", message="Compacting session"),
             )
 
-            result = await self._compacter.compact(context)
-            context.state.session_summary = result.summary
+            async def compact_session(latch: CancellationSuppressionLatch[None]) -> None:
+                latch.enable()
 
-            self._logger.debug(f"Compacted session {context.session.id}: {result.generation_info}")
+                result = await self._compacter.compact(context)
+                context.state.session_summary = result.summary
 
-            await context.session_event_emitter.emit_system_message_event(
-                trace_id=self._tracer.trace_id,
-                data=result.summary,
-                metadata={"source": "compacter"},
-            )
+                self._logger.debug(
+                    f"Compacted session {context.session.id}: {result.generation_info}"
+                )
+
+                await context.session_event_emitter.emit_system_message_event(
+                    trace_id=self._tracer.trace_id,
+                    data=result.summary,
+                    metadata={"source": "compacter"},
+                )
+
+            await latched_shield(compact_session)
         except Exception as exc:
             self._logger.error(
                 "Session compaction failed after response generation: "

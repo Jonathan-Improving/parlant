@@ -148,11 +148,14 @@ def _policy(
 
 
 def _tool_event(offset: int) -> Event:
+    creation_utc = datetime.now(timezone.utc)
+
     return Event(
         id=EventId(generate_id()),
         source=EventSource.SYSTEM,
         kind=EventKind.TOOL,
-        creation_utc=datetime.now(timezone.utc),
+        creation_utc=creation_utc,
+        modified_utc=creation_utc,
         offset=offset,
         trace_id="<main>",
         data=cast(
