@@ -32,7 +32,6 @@ from parlant.core.engines.compass.compacter import Compacter
 from parlant.core.engines.compass.matcher import Matcher
 from parlant.core.engines.compass.responder import Responder
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
-from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.engines.types import Context, Engine, UtteranceRequest
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
@@ -50,7 +49,6 @@ class CompassEngine(Engine):
         matcher: Matcher,
         responder: Responder,
         compacter: Compacter,
-        variable_loader: VariableLoader,
         entity_queries: EntityQueries,
         hooks: EngineHooks,
     ) -> None:
@@ -61,7 +59,6 @@ class CompassEngine(Engine):
         self._matcher = matcher
         self._responder = responder
         self._compacter = compacter
-        self._variable_loader = variable_loader
 
         self._entity_queries = entity_queries
         self._hooks = hooks
@@ -81,12 +78,11 @@ class CompassEngine(Engine):
             load_interaction=False,
         )
 
-        await self._load_usable_guidelines(engine_context)
-        await self._load_context_variables(engine_context)
+        await self._matcher.preload(engine_context)
 
         await safe_gather(
-            self._matcher.prefill(engine_context),
-            self._responder.prefill(engine_context),
+            self._matcher.warm_up(engine_context),
+            self._responder.warm_up(engine_context),
         )
 
     @override
@@ -119,15 +115,13 @@ class CompassEngine(Engine):
                 ),
             )
 
-            await self._load_context_variables(engine_context)
-
             # Fire on_preparing before the (latency-heavy) guideline/tool loading
             # so preparation-time hooks — e.g. global retrievers — start fetching
             # in parallel and have their results ready by message generation.
             if not await self._hooks.call_on_preparing(engine_context):
                 return False  # Hook requested to bail out
 
-            await self._load_usable_guidelines(engine_context)
+            await self._matcher.preload(engine_context)
 
             # Initial match before responding: both the composition-mode decision
             # and the guideline-gated retriever hook (fired at the start of the
@@ -151,7 +145,7 @@ class CompassEngine(Engine):
 
                 await self._refresh_interaction_history(engine_context)
                 await self._compact_if_needed(engine_context)
-                await self._matcher.prefill(engine_context)  # Optimize the cache for next turn
+                await self._matcher.warm_up(engine_context)  # Optimize the cache for next turn
 
             await latched_shield(finalize_turn)
         except Exception as e:
@@ -285,16 +279,6 @@ class CompassEngine(Engine):
                 "Session compaction failed after response generation: "
                 f"{exc}\n\n{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
             )
-
-    async def _load_usable_guidelines(self, context: EngineContext) -> None:
-        # The agent's full set of guidelines (used by both guideline matching and
-        # tool-relevance scoping); loaded once before the two run in parallel.
-        context.state.usable_guidelines = list(
-            await self._entity_queries.find_guidelines_for_context(context.agent.id, [])
-        )
-
-    async def _load_context_variables(self, context: EngineContext) -> None:
-        context.state.context_variables = await self._variable_loader.load(context)
 
     async def _refresh_state(self, engine_context: EngineContext) -> None:
         # Called by the responder when (re)building the turn instructions

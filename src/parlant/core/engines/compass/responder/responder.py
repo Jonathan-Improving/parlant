@@ -75,7 +75,7 @@ class Responder:
         effort = context.state.dynamic_effort_level
 
         if effort in (Effort.MIN, Effort.LOW):
-            return None  # No per-turn instructions for low effort agents
+            return None  # No per-step instructions for low effort agents
 
         cached_instructions: str | None = None
 
@@ -105,12 +105,12 @@ class Responder:
             case MessageOutputMode.BLOCK:
                 return self._blocking_loop
 
-    async def prefill(self, context: EngineContext) -> None:
+    async def warm_up(self, context: EngineContext) -> None:
         # Warm the provider cache for the stable prefix. The job itself is not
         # retained — respond() rebuilds an equivalent one and reads the warm
         # (content-addressed) cache. Prefill skips the turn instructions, so no
         # rematch callback is needed here.
-        await self._loop_for(context).prefill(self._build_job(context))
+        await self._loop_for(context).warm_up(self._build_job(context))
 
     async def respond(
         self,

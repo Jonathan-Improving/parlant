@@ -211,7 +211,7 @@ class GuidelineDistiller:
     def _cache_breakpoint(self, context: EngineContext) -> str:
         return self.CURRENT_TURN_CACHE_BREAKPOINT
 
-    async def prefill(self, context: EngineContext) -> GenerationInfo | None:
+    async def warm_up(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the distiller's shared prompt prefix, so
         the per-guideline fan-out can send only its live suffix. Best-effort:
         warming failures must not break preparation. See

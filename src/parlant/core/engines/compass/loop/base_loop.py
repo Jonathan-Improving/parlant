@@ -895,7 +895,7 @@ class BaseLoop(Loop):
             lambda: self._reviewer,
         )
 
-    async def prefill(self, job: LoopJob) -> Usage:
+    async def warm_up(self, job: LoopJob) -> Usage:
         self._logger.debug(f"Prefilling job for session {job.context.session.id}")
 
         # Warm the cache for the stable prefix only — the system instructions and

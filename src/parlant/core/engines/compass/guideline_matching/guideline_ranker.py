@@ -205,7 +205,7 @@ class GuidelineRanker:
         # sections (latest message, staged events, reasoning) happen to be present.
         return self.CURRENT_TURN_CACHE_BREAKPOINT
 
-    async def prefill(self, context: EngineContext) -> GenerationInfo | None:
+    async def warm_up(self, context: EngineContext) -> GenerationInfo | None:
         """Warm the generator's cache for the ranker's shared prompt prefix.
 
         `rank` fans out one request per guideline concurrently, each repeating the

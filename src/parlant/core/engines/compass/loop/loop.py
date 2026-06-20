@@ -58,7 +58,7 @@ class Loop(ABC):
     based on the provided system prompt."""
 
     @abstractmethod
-    async def prefill(self, job: LoopJob) -> Usage:
+    async def warm_up(self, job: LoopJob) -> Usage:
         """Warm the generator's cache for ``job``'s stable prefix — the system
         instructions plus the conversation so far, without the dynamic per-turn
         instructions. A later :meth:`run` of an equivalent job then reads the

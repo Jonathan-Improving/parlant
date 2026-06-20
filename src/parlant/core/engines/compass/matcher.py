@@ -32,6 +32,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_distiller import 
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.response_state import EngineContext
+from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.guidelines import Guideline, GuidelineId
 from parlant.core.loggers import Logger
@@ -80,6 +81,7 @@ class Matcher:
         matcher_registry: GuidelineMatcherRegistry,
         relationship_store: RelationshipStore,
         entity_queries: EntityQueries,
+        variable_loader: VariableLoader,
     ) -> None:
         self._logger = logger
         self._guideline_recaller = guideline_recaller
@@ -89,6 +91,7 @@ class Matcher:
         self._matcher_registry = matcher_registry
         self._relationship_store = relationship_store
         self._entity_queries = entity_queries
+        self._variable_loader = variable_loader
 
     async def fill(self, context: EngineContext) -> None:
         """Initial preparation: match all usable guidelines, rank the agent's tool
@@ -109,7 +112,16 @@ class Matcher:
         await self._reevaluate(context)
         await self._select_tools(context)
 
-    async def prefill(self, context: EngineContext) -> None:
+    async def preload(self, context: EngineContext) -> None:
+        # Load the shared prompt/matching inputs that matcher-owned preparation
+        # controls before matching and cache warm-up.
+        context.state.context_variables, guidelines = await safe_gather(
+            self._variable_loader.load(context),
+            self._entity_queries.find_guidelines_for_context(context.agent.id, []),
+        )
+        context.state.usable_guidelines = list(guidelines)
+
+    async def warm_up(self, context: EngineContext) -> None:
         """Warm only the matcher components that the current strategy can use."""
         should_prefill_ranker, should_prefill_distiller = await self._get_prefill_targets(context)
 
@@ -125,10 +137,10 @@ class Matcher:
         prefill_tasks = []
 
         if should_prefill_ranker:
-            prefill_tasks.append(self._guideline_ranker.prefill(context))
+            prefill_tasks.append(self._guideline_ranker.warm_up(context))
 
         if should_prefill_distiller:
-            prefill_tasks.append(self._guideline_distiller.prefill(context))
+            prefill_tasks.append(self._guideline_distiller.warm_up(context))
 
         await safe_gather(*prefill_tasks)
 

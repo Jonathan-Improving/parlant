@@ -46,7 +46,7 @@ class _FakeMatcherRegistry:
         return None
 
 
-def _make_prefill_matcher() -> Matcher:
+def _make_warm_up_matcher() -> Matcher:
     matcher = object.__new__(Matcher)
     matcher._guideline_ranker = AsyncMock()
     matcher._guideline_distiller = AsyncMock()
@@ -115,20 +115,20 @@ def test_that_description_only_distilled_matches_are_rendered_as_instruction_rem
 
 
 @pytest.mark.asyncio
-async def test_that_prefill_skips_distiller_when_no_guidelines_need_distillation() -> None:
-    matcher = _make_prefill_matcher()
+async def test_that_warm_up_skips_distiller_when_no_guidelines_need_distillation() -> None:
+    matcher = _make_warm_up_matcher()
     guideline = create_guideline(condition="customer asks for help", action="ask what they need")
     context = _context_with_guidelines(guideline, effort=Effort.HIGH)
 
-    await matcher.prefill(context)
+    await matcher.warm_up(context)
 
-    matcher._guideline_ranker.prefill.assert_awaited_once_with(context)
-    matcher._guideline_distiller.prefill.assert_not_awaited()
+    matcher._guideline_ranker.warm_up.assert_awaited_once_with(context)
+    matcher._guideline_distiller.warm_up.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_that_prefill_skips_ranker_when_only_distiller_is_needed() -> None:
-    matcher = _make_prefill_matcher()
+async def test_that_warm_up_skips_ranker_when_only_distiller_is_needed() -> None:
+    matcher = _make_warm_up_matcher()
     guideline = replace(
         create_guideline(
             condition="customer asks for help",
@@ -139,19 +139,19 @@ async def test_that_prefill_skips_ranker_when_only_distiller_is_needed() -> None
     )
     context = _context_with_guidelines(guideline, effort=Effort.HIGH)
 
-    await matcher.prefill(context)
+    await matcher.warm_up(context)
 
-    matcher._guideline_ranker.prefill.assert_not_awaited()
-    matcher._guideline_distiller.prefill.assert_awaited_once_with(context)
+    matcher._guideline_ranker.warm_up.assert_not_awaited()
+    matcher._guideline_distiller.warm_up.assert_awaited_once_with(context)
 
 
 @pytest.mark.asyncio
-async def test_that_prefill_skips_both_components_when_strategy_needs_neither() -> None:
-    matcher = _make_prefill_matcher()
+async def test_that_warm_up_skips_both_components_when_strategy_needs_neither() -> None:
+    matcher = _make_warm_up_matcher()
     guideline = create_guideline(condition="customer asks for help", action="ask what they need")
     context = _context_with_guidelines(guideline, effort=Effort.LOW)
 
-    await matcher.prefill(context)
+    await matcher.warm_up(context)
 
-    matcher._guideline_ranker.prefill.assert_not_awaited()
-    matcher._guideline_distiller.prefill.assert_not_awaited()
+    matcher._guideline_ranker.warm_up.assert_not_awaited()
+    matcher._guideline_distiller.warm_up.assert_not_awaited()
