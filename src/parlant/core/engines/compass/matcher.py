@@ -437,6 +437,29 @@ class Matcher:
             self._guideline_distiller.distill(context, distill_batch),
         )
 
+        recall_results = StringIO()
+
+        if recalled.recalled_guidelines:
+            recall_results.write(f"Duration: {recalled.duration:.3f}s\n\n")
+
+            for idx, recall_result in enumerate(recalled.recalled_guidelines, start=1):
+                g = recall_result.guideline
+
+                recall_results.write(
+                    f"### {idx} [Score: {recall_result.score:.2f} ({'Relevant' if recall_result.is_relevant else 'Not Relevant'})]\n\n"
+                )
+                if g.content.condition:
+                    recall_results.write(f"    Condition: {g.content.condition}\n")
+                if g.content.action:
+                    recall_results.write(f"    Action: {g.content.action}\n")
+                if g.content.description:
+                    recall_results.write(f"    Description: {g.content.description.strip()}\n")
+                recall_results.write("\n")
+
+            self._logger.debug(
+                f"{self.__class__.__name__} guideline recall results:\n{recall_results.getvalue()}"
+            )
+
         ranking_results = StringIO()
 
         if ranked.generation_info:
