@@ -876,6 +876,7 @@ The following are all the behavioral instructions and policies that govern your 
             for match in chain(ordinary, tool_enabled)
             if (
                 guidelines[match.guideline.id].content.action
+                or guidelines[match.guideline.id].content.description
                 or match.metadata.get("distilled_action")
             )
             and not match.guideline.criticality == Criticality.LOW
@@ -948,7 +949,7 @@ The following are all the behavioral instructions and policies that govern your 
 
                 guideline_texts.append(guideline)
 
-        guideline_list = "\n".join(guideline_texts)
+        guideline_list = "\n\n".join(guideline_texts)
 
         guideline_block = """\
 This is a gentle reminder to review your instructions again, particularly with respect to the following instructions.

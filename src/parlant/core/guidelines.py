@@ -807,7 +807,7 @@ class GuidelineVectorStore(GuidelineStore):
             signals=list(guideline_document.get("signals", [])),
         )
 
-    def _guideline_embedding_content(self, content: GuidelineContent) -> str:
+    def _guideline_embedding_content(self, guideline: Guideline) -> str:
         """Render a guideline's content as the string to embed.
 
         Treats ``None`` / empty / whitespace-only condition, action, and
@@ -815,28 +815,35 @@ class GuidelineVectorStore(GuidelineStore):
         ``When {condition}, then {action}``; a lone condition or action gets a
         labeled form; a non-empty description is appended as its own block.
         """
+        content = guideline.content
+
         condition = (content.condition or "").strip()
         action = (content.action or "").strip()
         description = (content.description or "").strip()
 
+        if guideline.title:
+            head = f"# {guideline.title}\n\n"
+        else:
+            head = ""
+
         if condition and action:
-            head = f"When {condition}, then {action}"
+            head += f"When {condition}, then {action}"
         elif condition:
-            head = f"Condition: {condition}"
+            head += f"Condition: {condition}"
         elif action:
-            head = f"Action: {action}"
+            head += f"Action: {action}"
         else:
             raise ValueError("Guideline must have at least a condition or an action")
 
         if description:
-            return f"{head}\n\nDescription: {description}"
+            return f"{head}\n\n{description}"
 
         return head
 
     def _list_guideline_contents(self, guideline: Guideline) -> list[str]:
         """The independent strings to embed for a guideline: its rendered
         content followed by each signal as its own vector."""
-        return [self._guideline_embedding_content(guideline.content), *guideline.signals]
+        return [self._guideline_embedding_content(guideline), *guideline.signals]
 
     async def _insert_vector_documents(self, guideline: Guideline) -> None:
         insertion_tasks = []

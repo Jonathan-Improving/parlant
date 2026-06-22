@@ -33,6 +33,7 @@ from parlant.core.sessions import (
     EventSource,
     EventUpdateParams,
     MessageEventData,
+    Participant,
     SessionId,
     SessionStore,
     StatusEventData,
@@ -144,7 +145,7 @@ class EventPublisher(EventEmitter):
             raise ValueError(f"Unsupported message event source: {source}")
 
         if isinstance(data, str):
-            participant = (
+            participant: Participant = (
                 {
                     "id": self.agent.id,
                     "display_name": self.agent.name,
