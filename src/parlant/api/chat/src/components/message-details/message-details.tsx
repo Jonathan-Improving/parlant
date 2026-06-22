@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
 import {EventInterface, Log} from '@/utils/interfaces';
-import React, {memo, ReactNode, useEffect, useRef, useState} from 'react';
+import React, {memo, ReactNode, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {getMessageLogs, getMessageLogsWithFilters} from '@/utils/logs';
 import {twJoin, twMerge} from 'tailwind-merge';
 import clsx from 'clsx';
@@ -143,18 +143,31 @@ const MessageDetails = ({
 		return () => window.removeEventListener('new-log', handler);
 	}, [event?.trace_id]);
 
-	const deleteFilterTab = (id: number | undefined) => {
-		const filterIndex = (filterTabs as Filter[]).findIndex((t) => t.id === id);
-		if (filterIndex === -1) return;
-		const filteredTabs = (filterTabs as Filter[]).filter((t) => t.id !== id);
-		(setFilterTabs as any)(filteredTabs);
+	const deleteFilterTab = useCallback(
+		(id: number | undefined) => {
+			const filterIndex = (filterTabs as Filter[]).findIndex((t) => t.id === id);
+			if (filterIndex === -1) return;
+			const filteredTabs = (filterTabs as Filter[]).filter((t) => t.id !== id);
+			(setFilterTabs as any)(filteredTabs);
 
-		if (currFilterTabs === id) {
-			const newTab = filteredTabs?.[(filterIndex || 1) - 1]?.id || filteredTabs?.[0]?.id || null;
-			setCurrFilterTabs(newTab);
-		}
-		if (!filteredTabs.length) setFilters({});
-	};
+			if (currFilterTabs === id) {
+				const newTab = filteredTabs?.[(filterIndex || 1) - 1]?.id || filteredTabs?.[0]?.id || null;
+				setCurrFilterTabs(newTab);
+			}
+			if (!filteredTabs.length) setFilters({});
+		},
+		[filterTabs, currFilterTabs, setFilterTabs]
+	);
+
+	// Stable across re-renders so memo(LogFilters) isn't defeated. During streaming
+	// status updates `setLogs` re-renders this component on every `new-log`; a fresh
+	// `applyFn`/`def` each time would force LogFilters (and its "Edit Filters"
+	// popover) to re-render needlessly.
+	const applyFn = useCallback((types: string[], level: string, content: string[]) => {
+		setTimeout(() => setFilters({types, level, content}), 0);
+	}, []);
+
+	const currentDef = useMemo(() => structuredClone((filterTabs as Filter[]).find((t: Filter) => currFilterTabs === t.id)?.def || null), [filterTabs, currFilterTabs]);
 
 	const shouldRenderTabs = event && !!logs?.length && !!filterTabs?.length;
 	const showCannedResponse = false;
@@ -184,14 +197,7 @@ const MessageDetails = ({
 					{showCannedResponse && !!cannedResponseEntries.length && <CannedResponses cannedResponses={cannedResponseEntries} />}
 					<div className={twMerge('flex justify-between bg-white z-[1] items-center min-h-[58px] h-[58px] p-[10px] pb-[4px] pe-0', shouldRenderTabs && 'min-h-0 h-0')}>
 						{!shouldRenderTabs && (
-							<LogFilters
-								showDropdown
-								filterId={currFilterTabs || undefined}
-								def={structuredClone((filterTabs as Filter[]).find((t: Filter) => currFilterTabs === t.id)?.def || null)}
-								applyFn={(types, level, content) => {
-									setTimeout(() => setFilters({types, level, content}), 0);
-								}}
-							/>
+							<LogFilters showDropdown filterId={currFilterTabs || undefined} def={currentDef} applyFn={applyFn} />
 						)}
 					</div>
 					{shouldRenderTabs && <FilterTabs currFilterTabs={currFilterTabs} filterTabs={filterTabs as Filter[]} setFilterTabs={setFilterTabs as any} setCurrFilterTabs={setCurrFilterTabs} />}
@@ -202,10 +208,8 @@ const MessageDetails = ({
 							deleteFilterTab={deleteFilterTab}
 							className={twMerge(!filteredLogs?.length && '', !logs?.length && 'absolute')}
 							filterId={currFilterTabs || undefined}
-							def={structuredClone((filterTabs as Filter[]).find((t: Filter) => currFilterTabs === t.id)?.def || null)}
-							applyFn={(types, level, content) => {
-								setTimeout(() => setFilters({types, level, content}), 0);
-							}}
+							def={currentDef}
+							applyFn={applyFn}
 						/>
 					)}
 					{!event && <EmptyState title='Feeling curious?' subTitle='Select a message for additional actions and information about its process.' />}
