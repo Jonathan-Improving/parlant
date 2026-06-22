@@ -97,6 +97,25 @@ class _TopicShiftEmbedder(_FakeEmbedder):
         return super()._vector_for_text(text)
 
 
+class _CentralityBoostEmbedder(_FakeEmbedder):
+    def _vector_for_text(self, text: str) -> list[float]:
+        lowered = text.lower()
+
+        if "central policy" in lowered:
+            return [0.1, -0.005]
+
+        if "east policy" in lowered:
+            return [1.0, 0.0]
+
+        if "west policy" in lowered:
+            return [-1.0, 0.01]
+
+        if "north request" in lowered:
+            return [0.0, 1.0]
+
+        return super()._vector_for_text(text)
+
+
 class _FakeNLPService:
     def __init__(self, embedder: _FakeEmbedder) -> None:
         self._embedder = embedder
@@ -127,11 +146,13 @@ class _FakeEmbeddingCache:
 def _radar_recaller(
     embedder: _FakeEmbedder | None = None,
     embedding_cache: _FakeEmbeddingCache | None = None,
+    centrality_boost_beta: float = GuidelineRecaller.DEFAULT_CENTRALITY_BOOST_BETA,
 ) -> GuidelineRecaller:
     return GuidelineRecaller(
         nlp_service=_FakeNLPService(embedder or _FakeEmbedder()),  # type: ignore[arg-type]
         tracer=create_engine_context(conversation=[]).tracer,
         embedding_cache=embedding_cache or _FakeEmbeddingCache(),  # type: ignore[arg-type]
+        centrality_boost_beta=centrality_boost_beta,
     )
 
 
@@ -199,6 +220,45 @@ async def test_that_the_recaller_unions_cumulative_and_latest_user_message_relev
 
     assert relevance_by_id[guidelines["refund"].id]
     assert scores_by_id[guidelines["refund"].id] > 0.0
+
+
+async def test_that_the_recaller_boosts_near_centroid_policy_entities() -> None:
+    central = create_guideline(
+        condition="central policy applies",
+        action="follow the central policy",
+        tags=[],
+    )
+    east = create_guideline(
+        condition="east policy applies",
+        action="follow the east policy",
+        tags=[],
+    )
+    west = create_guideline(
+        condition="west policy applies",
+        action="follow the west policy",
+        tags=[],
+    )
+    context = _context([(EventSource.CUSTOMER, "north request")])
+
+    unboosted_result = await _radar_recaller(
+        _CentralityBoostEmbedder(),
+        centrality_boost_beta=0.0,
+    ).recall(context, [central, east, west])
+    boosted_result = await _radar_recaller(_CentralityBoostEmbedder()).recall(
+        context,
+        [central, east, west],
+    )
+
+    unboosted_central = next(
+        r for r in unboosted_result.recalled_guidelines if r.guideline.id == central.id
+    )
+    boosted_central = next(
+        r for r in boosted_result.recalled_guidelines if r.guideline.id == central.id
+    )
+
+    assert not unboosted_central.is_relevant
+    assert boosted_central.is_relevant
+    assert boosted_central.score > unboosted_central.score
 
 
 async def test_that_the_recaller_embeds_policy_signals() -> None:

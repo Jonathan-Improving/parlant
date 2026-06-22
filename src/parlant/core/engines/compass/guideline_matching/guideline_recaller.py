@@ -15,7 +15,8 @@
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import sqrt
+from math import exp, sqrt
+from statistics import median
 import time
 
 from parlant.core.engines.compass.response_state import EngineContext
@@ -44,13 +45,22 @@ class GuidelineRecallResult:
 
 
 @dataclass(frozen=True)
+class _PolicyEntity:
+    direction: tuple[float, ...] | None
+    boost: float
+
+
+@dataclass(frozen=True)
 class _PolicyFrame:
     centroid: tuple[float, ...]
-    directions: dict[GuidelineId, tuple[tuple[float, ...], ...]]
+    entities: dict[GuidelineId, tuple[_PolicyEntity, ...]]
 
 
 class GuidelineRecaller:
     DEFAULT_RECALL_MARGIN = 0.03
+    DEFAULT_CENTRALITY_BOOST_BETA = 0.15
+    DEFAULT_CENTRALITY_BOOST_TAU = 0.5
+    DEFAULT_CENTRALITY_BOOST_SHARPNESS = 0.15
     _MAX_POLICY_FRAME_CACHE_SIZE = 32
 
     def __init__(
@@ -59,11 +69,17 @@ class GuidelineRecaller:
         tracer: Tracer,
         embedding_cache: EmbeddingCache,
         recall_margin: float = DEFAULT_RECALL_MARGIN,
+        centrality_boost_beta: float = DEFAULT_CENTRALITY_BOOST_BETA,
+        centrality_boost_tau: float = DEFAULT_CENTRALITY_BOOST_TAU,
+        centrality_boost_sharpness: float = DEFAULT_CENTRALITY_BOOST_SHARPNESS,
     ) -> None:
         self._nlp_service = nlp_service
         self._tracer = tracer
         self._embedding_cache = embedding_cache
         self._recall_margin = recall_margin
+        self._centrality_boost_beta = centrality_boost_beta
+        self._centrality_boost_tau = centrality_boost_tau
+        self._centrality_boost_sharpness = centrality_boost_sharpness
         self._policy_frame_cache: OrderedDict[
             tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _PolicyFrame
         ] = OrderedDict()
@@ -122,12 +138,17 @@ class GuidelineRecaller:
                 score=score,
             )
             for guideline in guidelines
-            if (policy_directions := frame.directions.get(guideline.id))
+            if (policy_entities := frame.entities.get(guideline.id))
             for score in [
                 max(
-                    self._dot(query_direction, policy_direction)
+                    (
+                        self._dot(query_direction, policy_entity.direction)
+                        if policy_entity.direction
+                        else 0.0
+                    )
+                    + policy_entity.boost
                     for query_direction in query_directions
-                    for policy_direction in policy_directions
+                    for policy_entity in policy_entities
                 )
             ]
         ]
@@ -167,15 +188,24 @@ class GuidelineRecaller:
                 for vector in vectors
             ]
         )
-        directions = {
+        residual_norms = [
+            self._norm(self._subtract(vector, centroid))
+            for vectors in vectors_by_guideline.values()
+            for vector in vectors
+        ]
+        median_residual_norm = median(residual_norms)
+        entities = {
             guideline_id: tuple(
-                direction
+                _PolicyEntity(
+                    direction=self._normalize(centered_vector),
+                    boost=self._centrality_boost(self._norm(centered_vector), median_residual_norm),
+                )
                 for vector in vectors
-                if (direction := self._normalize(self._subtract(vector, centroid))) is not None
+                for centered_vector in [self._subtract(vector, centroid)]
             )
             for guideline_id, vectors in vectors_by_guideline.items()
         }
-        frame = _PolicyFrame(centroid=centroid, directions=directions)
+        frame = _PolicyFrame(centroid=centroid, entities=entities)
 
         self._policy_frame_cache[key] = frame
         self._policy_frame_cache.move_to_end(key)
@@ -336,7 +366,7 @@ class GuidelineRecaller:
         return tuple(left_value - right_value for left_value, right_value in zip(left, right))
 
     def _normalize(self, vector: Sequence[float]) -> tuple[float, ...] | None:
-        norm = sqrt(sum(v * v for v in vector))
+        norm = self._norm(vector)
 
         if norm <= _EPSILON:
             return None
@@ -345,3 +375,29 @@ class GuidelineRecaller:
 
     def _dot(self, left: Sequence[float], right: Sequence[float]) -> float:
         return sum(left_value * right_value for left_value, right_value in zip(left, right))
+
+    def _norm(self, vector: Sequence[float]) -> float:
+        return sqrt(sum(v * v for v in vector))
+
+    def _centrality_boost(self, residual_norm: float, median_residual_norm: float) -> float:
+        if self._centrality_boost_beta <= 0.0:
+            return 0.0
+
+        if self._centrality_boost_sharpness <= _EPSILON:
+            return (
+                self._centrality_boost_beta
+                if residual_norm / max(median_residual_norm, _EPSILON)
+                < self._centrality_boost_tau
+                else 0.0
+            )
+
+        normalized_residual = residual_norm / max(median_residual_norm, _EPSILON)
+        weight = 1.0 / (
+            1.0
+            + exp(
+                -(self._centrality_boost_tau - normalized_residual)
+                / self._centrality_boost_sharpness
+            )
+        )
+
+        return self._centrality_boost_beta * weight
