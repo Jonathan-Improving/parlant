@@ -577,10 +577,14 @@ class Matcher:
         *,
         append: bool,
     ) -> None:
+        turn_matches = [
+            match for match in matches if match[1] == _ContextUsage.MATCH_CURRENT_TURN
+        ]
+
         # Classify into ordinary vs tool-enabled (the latter carries the tool ids
         # the matched guidelines enable).
-        tool_enabled = await self._find_tool_enabled_guideline_matches(matches)
-        ordinary = [m for m in matches if m not in tool_enabled]
+        tool_enabled = await self._find_tool_enabled_guideline_matches(turn_matches)
+        ordinary = [m for m in turn_matches if m not in tool_enabled]
 
         if append:
             # Never reorder, so the already-rendered guidelines stay a
@@ -594,7 +598,7 @@ class Matcher:
                 key[0]: tool_enabled[key] for key in tool_enabled
             }
             context.state.ordinary_guideline_matches = [
-                m[0] for m in set(matches).difference(set(tool_enabled.keys()))
+                m[0] for m in set(turn_matches).difference(set(tool_enabled.keys()))
             ]
 
         await self._store_session_guidelines(context, matches)

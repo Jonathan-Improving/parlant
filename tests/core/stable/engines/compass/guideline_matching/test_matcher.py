@@ -70,6 +70,7 @@ def _make_session_guidelines_matcher(
     entity_commands: _FakeEntityCommands | None = None,
 ) -> Matcher:
     matcher = object.__new__(Matcher)
+    matcher._entity_queries = _FakeEntityQueries()
     matcher._entity_commands = entity_commands or _FakeEntityCommands()
     return matcher
 
@@ -205,6 +206,38 @@ async def test_that_matched_guidelines_are_stored_in_session_metadata() -> None:
         str(guideline_1.id),
         str(guideline_2.id),
     }
+
+
+@pytest.mark.asyncio
+async def test_that_session_only_matches_do_not_enter_turn_matched_guidelines() -> None:
+    recalled_guideline = create_guideline(
+        condition="customer asks for help",
+        action="ask what they need",
+    )
+    turn_guideline = create_guideline(
+        condition="customer asks for refund",
+        action="explain refunds",
+    )
+    matcher = _make_session_guidelines_matcher()
+    context = _context_with_guidelines(recalled_guideline, turn_guideline, effort=Effort.MEDIUM)
+    matches = [
+        (
+            GuidelineMatch(guideline=recalled_guideline, rationale="recalled"),
+            _ContextUsage.INCLUDE_IN_SESSION,
+        ),
+        (
+            GuidelineMatch(guideline=turn_guideline, rationale="matched"),
+            _ContextUsage.MATCH_CURRENT_TURN,
+        ),
+    ]
+
+    await matcher._record(context, matches, append=False)
+
+    assert context.state.ordinary_guideline_matches == [
+        GuidelineMatch(guideline=turn_guideline, rationale="matched")
+    ]
+    assert context.state.tool_enabled_guideline_matches == {}
+    assert context.state.session_guidelines == {recalled_guideline, turn_guideline}
 
 
 @pytest.mark.asyncio
