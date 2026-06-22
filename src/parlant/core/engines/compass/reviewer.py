@@ -459,10 +459,10 @@ These calls have not been executed yet and you need to review them for correctne
         builder.add_context_variables(context.state.context_variables)
         builder.add_glossary(list(context.state.glossary_terms))
         builder.add_low_criticality_guideline_instructions(
-            [g for g in context.state.usable_guidelines if g.criticality == Criticality.LOW]
+            [g for g in context.state.session_guidelines if g.criticality == Criticality.LOW]
         )
         builder.add_system_wide_guidelines(
-            context.state.usable_guidelines,
+            context.state.session_guidelines,
             context.state.tools_by_guideline,
         )
 

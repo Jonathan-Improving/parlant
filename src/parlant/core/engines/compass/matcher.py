@@ -13,8 +13,9 @@
 # limitations under the License.
 
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
-from enum import IntEnum, auto
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
+from enum import Enum, IntEnum, auto
 from io import StringIO
 from itertools import chain
 import traceback
@@ -22,7 +23,7 @@ from typing import cast
 
 from parlant.core.agents import Effort
 from parlant.core.async_utils import safe_gather
-from parlant.core.common import Criticality
+from parlant.core.common import Criticality, JSONSerializable
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.guideline_matcher_registry import GuidelineMatcherRegistry
 from parlant.core.engines.compass.guideline_matching.guideline_function_matcher import (
@@ -33,7 +34,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_ranker import Gui
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.variable_loader import VariableLoader
-from parlant.core.entity_cq import EntityQueries
+from parlant.core.entity_cq import EntityCommands, EntityQueries
 from parlant.core.guidelines import Guideline, GuidelineId
 from parlant.core.loggers import Logger
 from parlant.core.relationships import (
@@ -46,9 +47,17 @@ from parlant.core.tags import TagId
 from parlant.core.tools import Tool, ToolId, ToolRelevanceResult
 
 _GUIDELINE_IS_COMPLEX: dict[GuidelineId, bool] = {}
+_SESSION_GUIDELINE_IDS_METADATA_KEY = "compass.session_guideline_ids"
 
 
-class MatcherStrategy(IntEnum):
+class _ContextUsage(Enum):
+    """How to use a guideline within the engine's context"""
+
+    INCLUDE_IN_SESSION = auto()
+    MATCH_CURRENT_TURN = auto()
+
+
+class _MatcherStrategy(IntEnum):
     """How much effort to spend deciding whether a guideline applies, cheapest to
     most thorough."""
 
@@ -81,6 +90,7 @@ class Matcher:
         matcher_registry: GuidelineMatcherRegistry,
         relationship_store: RelationshipStore,
         entity_queries: EntityQueries,
+        entity_commands: EntityCommands,
         variable_loader: VariableLoader,
     ) -> None:
         self._logger = logger
@@ -91,7 +101,20 @@ class Matcher:
         self._matcher_registry = matcher_registry
         self._relationship_store = relationship_store
         self._entity_queries = entity_queries
+        self._entity_commands = entity_commands
         self._variable_loader = variable_loader
+
+    async def preload(self, context: EngineContext) -> None:
+        # Load the shared prompt/matching inputs that matcher-owned preparation
+        # controls before matching and cache warm-up.
+        context.state.context_variables, guidelines = await safe_gather(
+            self._variable_loader.load(context),
+            self._entity_queries.find_guidelines_for_context(context.agent.id, []),
+        )
+
+        context.state.usable_guidelines = list(guidelines)
+
+        await self._load_session_guidelines(context)
 
     async def fill(self, context: EngineContext) -> None:
         """Initial preparation: match all usable guidelines, rank the agent's tool
@@ -111,15 +134,6 @@ class Matcher:
         (unchanged) conversation, so it isn't re-ranked."""
         await self._reevaluate(context)
         await self._select_tools(context)
-
-    async def preload(self, context: EngineContext) -> None:
-        # Load the shared prompt/matching inputs that matcher-owned preparation
-        # controls before matching and cache warm-up.
-        context.state.context_variables, guidelines = await safe_gather(
-            self._variable_loader.load(context),
-            self._entity_queries.find_guidelines_for_context(context.agent.id, []),
-        )
-        context.state.usable_guidelines = list(guidelines)
 
     async def warm_up(self, context: EngineContext) -> None:
         """Warm only the matcher components that the current strategy can use."""
@@ -154,21 +168,66 @@ class Matcher:
         if not guidelines:
             return False, False
 
-        await self._load_strategy_signals(context, guidelines)
+        await self._load_strategy_choice_signals(context, guidelines)
 
         prefill_ranker = False
         prefill_distiller = False
 
         for guideline in guidelines:
             match self._get_strategy(context, guideline):
-                case MatcherStrategy.RANK:
+                case _MatcherStrategy.RANK:
                     prefill_ranker = True
-                case MatcherStrategy.DISTILL:
+                case _MatcherStrategy.DISTILL:
                     prefill_distiller = True
 
         return prefill_ranker, prefill_distiller
 
     # --- guideline matching ---
+
+    async def _load_session_guidelines(self, context: EngineContext) -> None:
+        guideline_ids = self._read_session_guideline_ids(context.session.metadata)
+
+        guidelines_by_id = {g.id: g for g in context.state.usable_guidelines}
+
+        context.state.session_guidelines = {
+            guidelines_by_id[guideline_id]
+            for guideline_id in guideline_ids
+            if guideline_id in guidelines_by_id
+        }
+
+    async def _store_session_guidelines(
+        self,
+        context: EngineContext,
+        matches: Sequence[tuple[GuidelineMatch, _ContextUsage]],
+    ) -> None:
+        guidelines_by_id = {g.id: g for g in context.state.usable_guidelines}
+        guideline_ids = {m[0].guideline.id for m in matches}
+
+        context.state.session_guidelines = {guidelines_by_id[gid] for gid in guideline_ids}
+
+        current_guideline_ids = self._read_session_guideline_ids(context.session.metadata)
+
+        if guideline_ids == current_guideline_ids:
+            return
+
+        metadata = dict(context.session.metadata)
+
+        metadata[_SESSION_GUIDELINE_IDS_METADATA_KEY] = [
+            str(guideline_id) for guideline_id in guideline_ids
+        ]
+
+        await self._entity_commands.update_session(context.session.id, {"metadata": metadata})
+        context.session = replace(context.session, metadata=metadata)
+
+    def _read_session_guideline_ids(
+        self,
+        metadata: Mapping[str, JSONSerializable],
+    ) -> set[GuidelineId]:
+        last_known_state = set(
+            cast(Iterable[str], metadata.get(_SESSION_GUIDELINE_IDS_METADATA_KEY, []))
+        )
+
+        return {GuidelineId(guideline_id) for guideline_id in last_known_state}
 
     async def _match(self, context: EngineContext) -> None:
         matches = await self._run_batches(context, context.state.usable_guidelines)
@@ -192,7 +251,7 @@ class Matcher:
 
         await self._record(context, matches, append=True)
 
-    def _get_strategy(self, context: EngineContext, guideline: Guideline) -> MatcherStrategy:
+    def _get_strategy(self, context: EngineContext, guideline: Guideline) -> _MatcherStrategy:
         def needs_distillation(g: Guideline) -> bool:
             if (is_complex := _GUIDELINE_IS_COMPLEX.get(g.id)) is not None:
                 return is_complex
@@ -205,63 +264,63 @@ class Matcher:
             _GUIDELINE_IS_COMPLEX[g.id] = result
             return result
 
-        strategy = MatcherStrategy.RECALL
+        strategy = _MatcherStrategy.RECALL
 
         match context.state.dynamic_effort_level:
             case Effort.MIN:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
             case Effort.LOW:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
             case Effort.MEDIUM:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.HIGH:
                         strategy = (
-                            MatcherStrategy.DISTILL
+                            _MatcherStrategy.DISTILL
                             if needs_distillation(guideline)
-                            else MatcherStrategy.RANK
+                            else _MatcherStrategy.RANK
                         )
             case Effort.HIGH:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.NONE
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
                         strategy = (
-                            MatcherStrategy.DISTILL
+                            _MatcherStrategy.DISTILL
                             if needs_distillation(guideline)
-                            else MatcherStrategy.RANK
+                            else _MatcherStrategy.RANK
                         )
                     case Criticality.HIGH:
                         strategy = (
-                            MatcherStrategy.DISTILL
+                            _MatcherStrategy.DISTILL
                             if needs_distillation(guideline)
-                            else MatcherStrategy.RANK
+                            else _MatcherStrategy.RANK
                         )
             case Effort.MAX:
                 match guideline.criticality:
                     case Criticality.LOW:
-                        strategy = MatcherStrategy.RECALL
+                        strategy = _MatcherStrategy.RECALL
                     case Criticality.MEDIUM:
-                        strategy = MatcherStrategy.RANK
+                        strategy = _MatcherStrategy.RANK
                     case Criticality.HIGH:
-                        strategy = MatcherStrategy.RANK
+                        strategy = _MatcherStrategy.RANK
 
-        if strategy < MatcherStrategy.RANK:
+        if strategy < _MatcherStrategy.RANK:
             # There are some special conditions under which we want
             # to ensure a baseline of matching effort, since their
             # matching carries important implications.
@@ -269,21 +328,21 @@ class Matcher:
             if guideline.labels:
                 # If the guideline has labels, we want to ensure high-quality analytics,
                 # so we should at least rank - not use embeddings.
-                return MatcherStrategy.RANK
+                return _MatcherStrategy.RANK
 
             if self._check_if_has_dependencies(context, guideline):
                 # If the guideline has dependencies, it may be gating important follow-up
                 # guidelines, so we should at least rank - not use embeddings.
-                return MatcherStrategy.RANK
+                return _MatcherStrategy.RANK
 
             if self._check_if_has_tools(context, guideline):
                 # If the guideline has tools, it may be gating important interactions
                 # with data and/or actions, so we should at least rank - not use embeddings.
-                return MatcherStrategy.RANK
+                return _MatcherStrategy.RANK
 
         return strategy
 
-    async def _load_strategy_signals(
+    async def _load_strategy_choice_signals(
         self,
         context: EngineContext,
         guidelines: Sequence[Guideline],
@@ -334,7 +393,7 @@ class Matcher:
         self,
         context: EngineContext,
         guidelines: Sequence[Guideline],
-    ) -> Sequence[GuidelineMatch]:
+    ) -> Sequence[tuple[GuidelineMatch, _ContextUsage]]:
         """Decide which of `guidelines` apply by routing each to a strategy and
         running the resulting batches in parallel.
 
@@ -351,7 +410,7 @@ class Matcher:
         # _get_strategy runs per guideline and is synchronous, so precompute the
         # store-backed signals it consults (which guidelines have tools / are in a
         # dependency relationship) once, here.
-        await self._load_strategy_signals(context, guidelines)
+        await self._load_strategy_choice_signals(context, guidelines)
 
         code_batch: list[Guideline] = []
         recall_batch: list[Guideline] = []
@@ -364,11 +423,11 @@ class Matcher:
                 continue
 
             match self._get_strategy(context, guideline):
-                case MatcherStrategy.RECALL:
+                case _MatcherStrategy.RECALL:
                     recall_batch.append(guideline)
-                case MatcherStrategy.RANK:
+                case _MatcherStrategy.RANK:
                     rank_batch.append(guideline)
-                case MatcherStrategy.DISTILL:
+                case _MatcherStrategy.DISTILL:
                     distill_batch.append(guideline)
 
         code_matches, recalled, ranked, distilled = await safe_gather(
@@ -430,39 +489,54 @@ class Matcher:
                 f"{self.__class__.__name__} guideline distillation results:\n{distillation_results.getvalue()}"
             )
 
-        matches = list(code_matches)
+        matches: list[tuple[GuidelineMatch, _ContextUsage]] = [
+            (m, _ContextUsage.MATCH_CURRENT_TURN) for m in code_matches
+        ]
+
         matches += [
-            GuidelineMatch(
-                guideline=rc.guideline,
-                rationale="This may or may not be relevant right now - use your judgment.",
+            (
+                GuidelineMatch(
+                    guideline=rc.guideline,
+                    rationale="This may or may not be relevant right now - use your judgment.",
+                ),
+                _ContextUsage.INCLUDE_IN_SESSION,
             )
             for rc in recalled.recalled_guidelines
             if rc.is_relevant
         ]
+
         matches += [
-            GuidelineMatch(
-                guideline=rk.guideline,
-                rationale=rk.reasoning
-                or "This may or may not be relevant right now - use your judgment.",
+            (
+                GuidelineMatch(
+                    guideline=rk.guideline,
+                    rationale=rk.reasoning
+                    or "This may or may not be relevant right now - use your judgment.",
+                ),
+                _ContextUsage.MATCH_CURRENT_TURN,
             )
             for rk in ranked.ranked_guidelines
             if rk.is_relevant
         ]
+
         matches += [
-            GuidelineMatch(
-                guideline=dg.guideline,
-                rationale=dg.reasoning,
-                metadata={
-                    "distilled_action": self._format_distilled_policy_note(
-                        dg.guideline, dg.distilled_action
-                    )
-                }
-                if dg.distilled_action
-                else {},
+            (
+                GuidelineMatch(
+                    guideline=dg.guideline,
+                    rationale=dg.reasoning,
+                    metadata={
+                        "distilled_action": self._format_distilled_policy_note(
+                            dg.guideline, dg.distilled_action
+                        )
+                    }
+                    if dg.distilled_action
+                    else {},
+                ),
+                _ContextUsage.MATCH_CURRENT_TURN,
             )
             for dg in distilled.distilled_guidelines
             if dg.is_relevant
         ]
+
         return matches
 
     def _format_distilled_policy_note(self, guideline: Guideline, distilled_action: str) -> str:
@@ -476,7 +550,7 @@ class Matcher:
     async def _record(
         self,
         context: EngineContext,
-        matches: Sequence[GuidelineMatch],
+        matches: Sequence[tuple[GuidelineMatch, _ContextUsage]],
         *,
         append: bool,
     ) -> None:
@@ -488,23 +562,32 @@ class Matcher:
         if append:
             # Never reorder, so the already-rendered guidelines stay a
             # byte-identical prefix.
-            context.state.ordinary_guideline_matches.extend(ordinary)
-            context.state.tool_enabled_guideline_matches.update(tool_enabled)
-        else:
-            context.state.tool_enabled_guideline_matches = tool_enabled
-            context.state.ordinary_guideline_matches = list(
-                set(matches).difference(set(tool_enabled.keys()))
+            context.state.ordinary_guideline_matches.extend([key[0] for key in ordinary])
+            context.state.tool_enabled_guideline_matches.update(
+                {key[0]: tool_enabled[key] for key in tool_enabled}
             )
+        else:
+            context.state.tool_enabled_guideline_matches = {
+                key[0]: tool_enabled[key] for key in tool_enabled
+            }
+            context.state.ordinary_guideline_matches = [
+                m[0] for m in set(matches).difference(set(tool_enabled.keys()))
+            ]
+
+        await self._store_session_guidelines(context, matches)
 
         context.state.invalidate_cached_properties()
 
     async def _find_tool_enabled_guideline_matches(
         self,
-        guideline_matches: Sequence[GuidelineMatch],
-    ) -> dict[GuidelineMatch, list[ToolId]]:
-        matches_by_id = {m.guideline.id: m for m in guideline_matches}
+        guideline_matches: Sequence[tuple[GuidelineMatch, _ContextUsage]],
+    ) -> dict[tuple[GuidelineMatch, _ContextUsage], list[ToolId]]:
+        matches_by_id = {m[0].guideline.id: m for m in guideline_matches}
 
-        tools_for_guidelines: dict[GuidelineMatch, list[ToolId]] = defaultdict(list)
+        tools_for_guidelines: dict[tuple[GuidelineMatch, _ContextUsage], list[ToolId]] = (
+            defaultdict(list)
+        )
+
         for association in await self._entity_queries.find_guideline_tool_associations():
             if association.guideline_id in matches_by_id:
                 tools_for_guidelines[matches_by_id[association.guideline_id]].append(
@@ -635,8 +718,9 @@ class Matcher:
         context.state.available_tools = sorted(chosen, key=lambda tool: tool.name)
 
     def _build_tool_query(self, context: EngineContext) -> str:
-        messages = [f"{m.source}: {m.content}" for m in context.interaction.messages]
-        return f"{context.agent.description or ''}\n\n{messages}"
+        return (
+            f"{context.agent.description or ''}\n\n{self._build_interaction_query_lines(context)}"
+        )
 
     # --- glossary ---
 
@@ -644,20 +728,29 @@ class Matcher:
         # Load the glossary terms most relevant to the conversation so far (capped at
         # _MAX_GLOSSARY_TERMS) into the state, so the responder can surface them in its
         # (cached) system instructions. Loaded once here, not per response step.
-        messages = [f"{m.source}: {m.content}" for m in context.interaction.messages]
-        if not messages:
+        terms = await self._entity_queries.find_glossary_terms_for_context(
+            context.agent.id,
+            query=str(self._build_interaction_query_lines(context)),
+            max_terms=self._MAX_GLOSSARY_TERMS,
+        )
+        context.state.glossary_terms = set(terms)
+
+    def _build_interaction_query_lines(self, context: EngineContext) -> list[str]:
+        lines: list[str] = []
+
+        if context.state.session_summary:
+            lines.append(f"Session summary: {context.state.session_summary}")
+
+        lines.extend(f"{m.source}: {m.content}" for m in context.interaction.messages)
+
+        if not lines:
             # No conversation yet (the initialize-time warm-up). Rank against a neutral
             # greeting so the glossary still loads — letting the warmed prefix include it
             # and match the first real turn. With a glossary under the cap the full set
             # is returned regardless of query, so it matches that turn exactly.
-            messages = ["User: Hello"]
+            lines.append("User: Hello")
 
-        terms = await self._entity_queries.find_glossary_terms_for_context(
-            context.agent.id,
-            query=str(messages),
-            max_terms=self._MAX_GLOSSARY_TERMS,
-        )
-        context.state.glossary_terms = set(terms)
+        return lines
 
     async def _agent_candidate_tool_ids(self, context: EngineContext) -> set[ToolId]:
         guideline_ids = {g.id for g in context.state.usable_guidelines}

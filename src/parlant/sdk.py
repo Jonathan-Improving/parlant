@@ -5583,7 +5583,7 @@ class Server:
 
             c[NLPService] = self._nlp_service_func(c)
             c[EstimatingTokenizer] = (
-                c[NLPService]
+                cast(EstimatingTokenizer, c[NLPService])
                 if isinstance(c[NLPService], EstimatingTokenizer)
                 else ZeroEstimatingTokenizer()
             )

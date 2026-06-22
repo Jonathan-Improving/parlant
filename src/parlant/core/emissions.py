@@ -75,18 +75,10 @@ class EventEmitter(ABC):
         trace_id: str,
         data: str | MessageEventData,
         metadata: Mapping[str, JSONSerializable] | None = None,
+        *,
+        source: EventSource = EventSource.AI_AGENT,
     ) -> MessageEventHandle:
         """Emit a message event with the given trace ID and data."""
-        ...
-
-    @abstractmethod
-    async def emit_system_message_event(
-        self,
-        trace_id: str,
-        data: str | MessageEventData,
-        metadata: Mapping[str, JSONSerializable] | None = None,
-    ) -> MessageEventHandle:
-        """Emit a system message event with the given trace ID and data."""
         ...
 
     @abstractmethod

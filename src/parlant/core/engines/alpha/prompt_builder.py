@@ -817,18 +817,18 @@ In all other situations, you are expected to follow the instructions when and as
 
         for i, g in enumerate(listed, start=1):
             if g.title:
-                text = f"### Instruction #{i}: {g.title}"
+                text = f"### Instruction #{i}: {g.title}\n\n"
             elif g.content.condition:
                 if g.content.action:
-                    text = f"### Instruction #{i}: When {g.content.condition}, then {g.content.action}\n"
+                    text = f"### Instruction #{i}: When {g.content.condition}, then {g.content.action}\n\n"
                 elif g.content.description or (g.id in tools_by_guideline):
-                    text = f"### Instruction #{i}: When {g.content.condition}...\n"
+                    text = f"### Instruction #{i}: When {g.content.condition}...\n\n"
                 elif g.id not in tools_by_guideline:
                     # Pure condition guideline - probably used for relationships
                     # and not meant to be included in the prompt. Skip it.
                     continue
             else:
-                text = f"### Instruction #{i}: {g.content.action}\n"
+                text = f"### Instruction #{i}: {g.content.action}\n\n"
 
             if g.content.description:
                 text += f"{g.content.description.strip()}"
@@ -908,7 +908,9 @@ The following are all the behavioral instructions and policies that govern your 
                     ):
                         guideline = f"### Remember, when {guidelines[p.guideline.id].content.condition}, then {guidelines[p.guideline.id].content.action}"
                     elif guidelines[p.guideline.id].content.condition:
-                        guideline = f"### Remember, when {guidelines[p.guideline.id].content.condition}"
+                        guideline = (
+                            f"### Remember, when {guidelines[p.guideline.id].content.condition}"
+                        )
                     else:
                         guideline = f"### Remember: {guidelines[p.guideline.id].content.action}"
 

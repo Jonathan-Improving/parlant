@@ -107,6 +107,7 @@ class ResponseState:
     prepared_to_respond: bool = False
     message_events: list[EmittedEvent] = field(default_factory=list)
     usable_guidelines: list[Guideline] = field(default_factory=list)
+    session_guidelines: set[Guideline] = field(default_factory=set)
     additional_canned_response_fields: dict[str, Any] = field(default_factory=dict)
     iterations: list[IterationState] = field(default_factory=list)
 

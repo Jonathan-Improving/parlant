@@ -137,63 +137,36 @@ class EventPublisher(EventEmitter):
         trace_id: str,
         data: str | MessageEventData,
         metadata: Mapping[str, JSONSerializable] | None = None,
+        *,
+        source: EventSource = EventSource.AI_AGENT,
     ) -> MessageEventHandle:
+        if source not in (EventSource.AI_AGENT, EventSource.SYSTEM):
+            raise ValueError(f"Unsupported message event source: {source}")
+
         if isinstance(data, str):
+            participant = (
+                {
+                    "id": self.agent.id,
+                    "display_name": self.agent.name,
+                }
+                if source == EventSource.AI_AGENT
+                else {
+                    "id": None,
+                    "display_name": "System",
+                }
+            )
             message_data = cast(
                 JSONSerializable,
                 MessageEventData(
                     message=data,
-                    participant={
-                        "id": self.agent.id,
-                        "display_name": self.agent.name,
-                    },
+                    participant=participant,
                 ),
             )
         else:
             message_data = cast(JSONSerializable, data)
 
         emitted_event = EmittedEvent(
-            source=EventSource.AI_AGENT,
-            kind=EventKind.MESSAGE,
-            trace_id=trace_id,
-            data=message_data,
-            metadata=metadata,
-        )
-
-        persisted_event = await self._publish_event(emitted_event)
-
-        updater = EventPublisherMessageUpdater(
-            session_store=self._store,
-            session_id=self._session_id,
-            event=emitted_event,
-            persisted_event_id=persisted_event.id,
-        )
-
-        return MessageEventHandle(event=emitted_event, update=updater)
-
-    @override
-    async def emit_system_message_event(
-        self,
-        trace_id: str,
-        data: str | MessageEventData,
-        metadata: Mapping[str, JSONSerializable] | None = None,
-    ) -> MessageEventHandle:
-        if isinstance(data, str):
-            message_data = cast(
-                JSONSerializable,
-                MessageEventData(
-                    message=data,
-                    participant={
-                        "id": None,
-                        "display_name": "System",
-                    },
-                ),
-            )
-        else:
-            message_data = cast(JSONSerializable, data)
-
-        emitted_event = EmittedEvent(
-            source=EventSource.SYSTEM,
+            source=source,
             kind=EventKind.MESSAGE,
             trace_id=trace_id,
             data=message_data,

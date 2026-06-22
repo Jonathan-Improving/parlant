@@ -245,10 +245,10 @@ In cases of conflict, prioritize the business's values and ensure your decisions
         # instruction). The per-turn matched list (see _build_turn_instructions) then
         # just reminds the agent which of these are currently relevant.
         builder.add_low_criticality_guideline_instructions(
-            [g for g in context.state.usable_guidelines if g.criticality == Criticality.LOW]
+            [g for g in context.state.session_guidelines if g.criticality == Criticality.LOW]
         )
         builder.add_system_wide_guidelines(
-            context.state.usable_guidelines,
+            context.state.session_guidelines,
             context.state.tools_by_guideline,
         )
 

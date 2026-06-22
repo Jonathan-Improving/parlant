@@ -20,7 +20,11 @@ from parlant.core.agents import Effort
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.matcher import Matcher
+from parlant.core.engines.compass.matcher import (
+    Matcher,
+    _ContextUsage,
+    _SESSION_GUIDELINE_IDS_METADATA_KEY,
+)
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.sessions import EventSource
 
@@ -34,6 +38,11 @@ from tests.core.stable.engines.compass.guideline_matching.utils import (
 class _FakeEntityQueries:
     async def find_guideline_tool_associations(self):
         return []
+
+
+class _FakeEntityCommands:
+    def __init__(self) -> None:
+        self.update_session = AsyncMock()
 
 
 class _FakeRelationshipStore:
@@ -53,6 +62,15 @@ def _make_warm_up_matcher() -> Matcher:
     matcher._matcher_registry = _FakeMatcherRegistry()
     matcher._relationship_store = _FakeRelationshipStore()
     matcher._entity_queries = _FakeEntityQueries()
+    matcher._entity_commands = _FakeEntityCommands()
+    return matcher
+
+
+def _make_session_guidelines_matcher(
+    entity_commands: _FakeEntityCommands | None = None,
+) -> Matcher:
+    matcher = object.__new__(Matcher)
+    matcher._entity_commands = entity_commands or _FakeEntityCommands()
     return matcher
 
 
@@ -112,6 +130,100 @@ def test_that_description_only_distilled_matches_are_rendered_as_instruction_rem
     assert '### Review the instructions under "Book flight"' in prompt
     assert "Ask the user for the trip type." in prompt
     assert "IMPORTANT: Please go back and reason" in prompt
+
+
+def test_that_matcher_queries_start_with_session_summary_when_available() -> None:
+    matcher = _make_session_guidelines_matcher()
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "current request")])
+    context.state = ResponseState(session_summary="Earlier booking details were collected.")
+
+    lines = matcher._build_interaction_query_lines(context)
+
+    assert lines == [
+        "Session summary: Earlier booking details were collected.",
+        "EventSource.CUSTOMER: current request",
+    ]
+    assert matcher._build_tool_query(context).endswith(str(lines))
+
+
+@pytest.mark.asyncio
+async def test_that_session_guidelines_are_loaded_from_session_metadata() -> None:
+    guideline_1 = create_guideline(condition="customer asks for help", action="ask what they need")
+    guideline_2 = create_guideline(condition="customer asks for refund", action="explain refunds")
+    context = _context_with_guidelines(guideline_1, guideline_2, effort=Effort.MEDIUM)
+    context.session = replace(
+        context.session,
+        metadata={
+            _SESSION_GUIDELINE_IDS_METADATA_KEY: [
+                str(guideline_2.id),
+                "missing-guideline",
+                str(guideline_2.id),
+                str(guideline_1.id),
+                17,
+            ]
+        },
+    )
+    matcher = _make_session_guidelines_matcher()
+
+    await matcher._load_session_guidelines(context)
+
+    assert context.state.session_guidelines == {guideline_2, guideline_1}
+
+
+@pytest.mark.asyncio
+async def test_that_matched_guidelines_are_stored_in_session_metadata() -> None:
+    guideline_1 = create_guideline(condition="customer asks for help", action="ask what they need")
+    guideline_2 = create_guideline(condition="customer asks for refund", action="explain refunds")
+    guideline_3 = create_guideline(condition="customer asks for billing", action="explain billing")
+    entity_commands = _FakeEntityCommands()
+    matcher = _make_session_guidelines_matcher(entity_commands)
+    context = _context_with_guidelines(guideline_1, guideline_2, guideline_3, effort=Effort.MEDIUM)
+    context.state.session_guidelines = [guideline_1]
+    context.state.ordinary_guideline_matches = [
+        GuidelineMatch(guideline=guideline_2, rationale="relevant"),
+        GuidelineMatch(guideline=guideline_1, rationale="still relevant"),
+    ]
+    matches = [
+        (GuidelineMatch(guideline=guideline_2, rationale="relevant"), _ContextUsage.MATCH_CURRENT_TURN),
+        (
+            GuidelineMatch(guideline=guideline_1, rationale="still relevant"),
+            _ContextUsage.MATCH_CURRENT_TURN,
+        ),
+    ]
+
+    await matcher._store_session_guidelines(context, matches)
+
+    assert context.state.session_guidelines == {guideline_1, guideline_2}
+    entity_commands.update_session.assert_awaited_once()
+    updated_session_id, params = entity_commands.update_session.await_args.args
+    assert updated_session_id == context.session.id
+    assert set(params["metadata"][_SESSION_GUIDELINE_IDS_METADATA_KEY]) == {
+        str(guideline_1.id),
+        str(guideline_2.id),
+    }
+    assert set(context.session.metadata[_SESSION_GUIDELINE_IDS_METADATA_KEY]) == {
+        str(guideline_1.id),
+        str(guideline_2.id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_that_session_guidelines_are_not_stored_when_metadata_is_unchanged() -> None:
+    guideline = create_guideline(condition="customer asks for help", action="ask what they need")
+    entity_commands = _FakeEntityCommands()
+    matcher = _make_session_guidelines_matcher(entity_commands)
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+    context.state.session_guidelines = [guideline]
+    context.state.ordinary_guideline_matches = [GuidelineMatch(guideline=guideline, rationale="")]
+    context.session = replace(
+        context.session,
+        metadata={_SESSION_GUIDELINE_IDS_METADATA_KEY: [str(guideline.id)]},
+    )
+    matches = [(GuidelineMatch(guideline=guideline, rationale=""), _ContextUsage.MATCH_CURRENT_TURN)]
+
+    await matcher._store_session_guidelines(context, matches)
+
+    entity_commands.update_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

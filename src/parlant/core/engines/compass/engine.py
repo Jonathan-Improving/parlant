@@ -270,10 +270,17 @@ class CompassEngine(Engine):
 
             self._logger.debug(f"Compacted session {context.session.id}: {result.generation_info}")
 
-            await context.session_event_emitter.emit_system_message_event(
+            await context.session_event_emitter.emit_message_event(
                 trace_id=self._tracer.trace_id,
-                data=result.summary,
+                data=MessageEventData(
+                    message=result.summary,
+                    participant={
+                        "id": None,
+                        "display_name": "System",
+                    },
+                ),
                 metadata={"source": "compacter"},
+                source=EventSource.SYSTEM,
             )
         except Exception as exc:
             self._logger.error(
