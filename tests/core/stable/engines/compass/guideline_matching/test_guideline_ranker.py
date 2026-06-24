@@ -17,7 +17,10 @@ from typing import Any, Sequence, cast
 from lagom import Container
 from pytest import fixture
 
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
+from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
+    GuidelineRanker,
+    _format_guideline,
+)
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.guidelines import Guideline
 from parlant.core.loggers import StdoutLogger
@@ -56,6 +59,32 @@ def _cached_prefix(ranker: GuidelineRanker, context: EngineContext, guideline: G
     index = prompt.find(breakpoint_marker)
     assert index != -1, f"cache breakpoint {breakpoint_marker!r} not found in prompt"
     return prompt[:index]
+
+
+def test_that_ranker_formats_description_only_policy_guideline() -> None:
+    assert _format_guideline(
+        title="Refund Eligibility",
+        condition="",
+        action=None,
+        description="Refunds are available before shipment.",
+    ) == (
+        "Title: Refund Eligibility\n\n"
+        "Policy: Refunds are available before shipment."
+    )
+
+
+def test_that_ranker_formats_condition_action_guideline_with_title_and_details() -> None:
+    assert _format_guideline(
+        title="Refund Flow",
+        condition="the customer asks for a refund",
+        action="start the refund flow",
+        description="Use the refund system.",
+    ) == (
+        "Title: Refund Flow\n\n"
+        "When: the customer asks for a refund\n"
+        "Then: start the refund flow\n\n"
+        "Details: Use the refund system."
+    )
 
 
 def test_that_the_ranker_prompt_includes_the_agent_reasoning_but_keeps_it_out_of_the_cached_prefix(

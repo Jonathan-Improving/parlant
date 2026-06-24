@@ -21,7 +21,10 @@ from lagom import Container
 from pytest import fixture
 
 from parlant.core.agents import Effort
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
+from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+    GuidelineDistiller,
+    _format_guideline,
+)
 from parlant.core.engines.compass.response_state import ResponseState
 
 from parlant.core.capabilities import Capability
@@ -106,12 +109,13 @@ def distiller(container: Container) -> GuidelineDistiller:
 async def base_test_that_a_guideline_is_distilled_correctly(
     distiller: GuidelineDistiller,
     condition: str,
-    action: str,
+    action: str | None,
     conversation: list[tuple[EventSource, str]],
     expected_relevant: bool,
     expected_distilled_action: str | None = None,
     *,
     description: str | None = None,
+    title: str | None = None,
     agent_description: str | None = None,
     customer_name: str | None = None,
     tools: Sequence[tuple[ToolId, Tool]] = [],
@@ -126,7 +130,12 @@ async def base_test_that_a_guideline_is_distilled_correctly(
     - if it is relevant, its distilled action semantically matches
       ``expected_distilled_action`` (checked via ``nlp_test``).
     """
-    guideline = create_guideline(condition=condition, action=action, description=description)
+    guideline = create_guideline(
+        condition=condition,
+        action=action,
+        description=description,
+        title=title,
+    )
 
     agent = create_agent(description=agent_description) if agent_description else None
     customer = create_customer(name=customer_name) if customer_name else None
@@ -168,6 +177,51 @@ async def base_test_that_a_guideline_is_distilled_correctly(
 
 def test_that_a_guideline_distiller_can_be_created(distiller: GuidelineDistiller) -> None:
     assert distiller is not None
+
+
+def test_that_distiller_formats_description_only_policy_guideline() -> None:
+    assert _format_guideline(
+        title="Baggage and Insurance Changes",
+        condition="",
+        action=None,
+        description=(
+            "Change baggage and insurance:\n"
+            "- The user can add but not remove checked bags.\n"
+            "- The user cannot add insurance after initial booking."
+        ),
+    ) == (
+        "Condition: the customer's current request or situation is governed by "
+        "the Baggage and Insurance Changes policy. Action: apply the policy. "
+        "Details: Title: Baggage and Insurance Changes\n"
+        "Policy: Change baggage and insurance:\n"
+        "- The user can add but not remove checked bags.\n"
+        "- The user cannot add insurance after initial booking."
+    )
+
+
+def test_that_distiller_formats_condition_action_guideline_with_title_and_details() -> None:
+    assert _format_guideline(
+        title="Refund Flow",
+        condition="the customer asks for a refund",
+        action="explain the refund process",
+        description="Use the refund system.",
+    ) == (
+        "Title: Refund Flow\n\n"
+        "Condition: the customer asks for a refund. Action: explain the refund process\n\n"
+        "Details: Use the refund system."
+    )
+
+
+def test_that_distiller_preserves_legacy_condition_action_guideline_format() -> None:
+    assert _format_guideline(
+        title=None,
+        condition="the customer asks for a refund",
+        action="explain the refund process",
+        description="Use the refund system.",
+    ) == (
+        "Condition: the customer asks for a refund. "
+        "Action: explain the refund process Details: Use the refund system."
+    )
 
 
 async def test_that_a_relevant_guideline_is_distilled_to_the_relevant_action(
@@ -1841,6 +1895,25 @@ async def test_that_a_policy_guideline_surfaces_only_the_insurance_rule_for_an_i
         distiller,
         condition=_BAGGAGE_INSURANCE_CONDITION,
         action=_BAGGAGE_INSURANCE_ACTION,
+        description=_BAGGAGE_INSURANCE_DESCRIPTION,
+        conversation=[
+            (EventSource.CUSTOMER, "I forgot to get insurance when I booked - can I add it now?"),
+        ],
+        expected_relevant=True,
+        expected_distilled_action=(
+            "tell the customer that insurance cannot be added after the initial booking"
+        ),
+    )
+
+
+async def test_that_a_description_only_policy_guideline_surfaces_the_relevant_rule(
+    distiller: GuidelineDistiller,
+) -> None:
+    await base_test_that_a_guideline_is_distilled_correctly(
+        distiller,
+        title="Baggage and Insurance Changes",
+        condition="",
+        action=None,
         description=_BAGGAGE_INSURANCE_DESCRIPTION,
         conversation=[
             (EventSource.CUSTOMER, "I forgot to get insurance when I booked - can I add it now?"),

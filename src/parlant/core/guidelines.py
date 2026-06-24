@@ -832,13 +832,16 @@ class GuidelineVectorStore(GuidelineStore):
             head += f"Condition: {condition}"
         elif action:
             head += f"Action: {action}"
-        else:
-            raise ValueError("Guideline must have at least a condition or an action")
 
         if description:
-            return f"{head}\n\n{description}"
+            text_content = f"{head}\n\n{description}"
+        else:
+            text_content = head
 
-        return head
+        if not content:
+            raise ValueError("Guideline has no content")
+
+        return text_content
 
     def _list_guideline_contents(self, guideline: Guideline) -> list[str]:
         """The independent strings to embed for a guideline: its rendered

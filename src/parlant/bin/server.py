@@ -166,6 +166,10 @@ from parlant.core.services.indexing.guideline_continuous_proposer import (
     GuidelineContinuousProposer,
     GuidelineContinuousPropositionSchema,
 )
+from parlant.core.services.indexing.guideline_signal_proposer import (
+    GuidelineSignalProposer,
+    GuidelineSignalPropositionSchema,
+)
 from parlant.core.services.indexing.journey_reachable_nodes_evaluation import (
     ReachableNodesEvaluationSchema,
 )
@@ -671,6 +675,7 @@ async def setup_container() -> AsyncIterator[Container]:
 
     _define_singleton(c, GuidelineActionProposer, GuidelineActionProposer)
     _define_singleton(c, GuidelineContinuousProposer, GuidelineContinuousProposer)
+    _define_singleton(c, GuidelineSignalProposer, GuidelineSignalProposer)
     _define_singleton(c, CustomerDependentActionDetector, CustomerDependentActionDetector)
     _define_singleton(c, ToolRunningActionDetector, ToolRunningActionDetector)
 
@@ -969,6 +974,7 @@ async def initialize_container(
         OverlappingToolsBatchSchema,
         GuidelineActionPropositionSchema,
         GuidelineContinuousPropositionSchema,
+        GuidelineSignalPropositionSchema,
         CustomerDependentActionSchema,
         ToolRunningActionSchema,
         AgentIntentionProposerSchema,

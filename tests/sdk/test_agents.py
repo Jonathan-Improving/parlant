@@ -97,6 +97,8 @@ class Test_that_an_agent_can_create_guideline(SDKTest):
         assert guideline.content.condition == "Always say hello"
         assert guideline.content.action == "Say hello to the user"
         assert guideline.tags == [Tag.for_agent_id(self.agent.id).id]
+        assert len(guideline.signals) == 5
+        assert all(signal for signal in guideline.signals)
 
 
 class Test_that_an_agent_can_attach_tool(SDKTest):

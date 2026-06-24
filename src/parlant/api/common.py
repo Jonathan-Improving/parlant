@@ -251,6 +251,7 @@ GuidelineCriticalityField: TypeAlias = Annotated[
 guideline_content_example: ExampleJson = {
     "condition": "User asks about product pricing",
     "action": "Provide current price list and any active discounts",
+    "description": "Use the public pricing sheet for the customer's region.",
 }
 
 
@@ -267,6 +268,7 @@ class GuidelineContentDTO(
 
     condition: GuidelineConditionField
     action: GuidelineActionField | None = None
+    description: GuidelineDescriptionField | None = None
 
 
 class GuidelinePayloadOperationDTO(Enum):

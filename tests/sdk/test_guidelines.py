@@ -552,6 +552,7 @@ class Test_that_a_guideline_is_reevaluated_after_its_tool_runs_with_compass_engi
             engine="compass",
             output_mode=p.OutputMode.STREAM,
             composition_mode=p.CompositionMode.FLUID,
+            effort=p.Effort.HIGH,
         )
 
         @tool

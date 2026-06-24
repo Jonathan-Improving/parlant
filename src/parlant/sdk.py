@@ -624,6 +624,7 @@ class _CachedGuidelineEvaluation(TypedDict, total=False):
     creation_utc: str
     version: Version.String
     properties: dict[str, JSONSerializable]
+    signals: list[str]
 
 
 class _CachedJourneyEvaluation(TypedDict, total=False):
@@ -643,6 +644,7 @@ class _CachedEvaluator:
     @dataclass(frozen=True)
     class GuidelineEvaluation:
         properties: dict[str, JSONSerializable]
+        signals: Sequence[str]
 
     def __init__(
         self,
@@ -697,12 +699,15 @@ class _CachedEvaluator:
         tool_ids: Sequence[ToolId],
         journey_state_propositions: bool,
         properties_proposition: bool,
+        signal_proposition: bool,
+        title: str | None,
+        agent_id: AgentId | None,
     ) -> str:
         """Generate a hash for the guideline evaluation request."""
         tool_ids_str = ",".join(str(tool_id) for tool_id in tool_ids) if tool_ids else ""
 
         return xxhash.xxh3_128_hexdigest(
-            f"{g.condition or ''}:{g.action or ''}:{tool_ids_str}:{journey_state_propositions}:{properties_proposition}".encode()
+            f"{title or ''}:{g.condition or ''}:{g.action or ''}:{g.description or ''}:{tool_ids_str}:{journey_state_propositions}:{properties_proposition}:{signal_proposition}:{agent_id or ''}".encode()
         )
 
     def _hash_journey_evaluation_request(
@@ -722,11 +727,15 @@ class _CachedEvaluator:
         entity_id: GuidelineId,
         g: GuidelineContent,
         tool_ids: Sequence[ToolId] = [],
+        title: str | None = None,
+        agent_id: AgentId | None = None,
     ) -> _CachedEvaluator.GuidelineEvaluation:
         return await self._evaluate_guideline(
             entity_id=entity_id,
             g=g,
             tool_ids=tool_ids,
+            title=title,
+            agent_id=agent_id,
         )
 
     async def _evaluate_guideline(
@@ -737,6 +746,9 @@ class _CachedEvaluator:
         action_proposition: bool = True,
         journey_state_proposition: bool = False,
         properties_proposition: bool = True,
+        signal_proposition: bool = True,
+        title: str | None = None,
+        agent_id: AgentId | None = None,
     ) -> _CachedEvaluator.GuidelineEvaluation:
         # First check if we have a cached evaluation for this guideline
         _hash = self._hash_guideline_evaluation_request(
@@ -744,6 +756,9 @@ class _CachedEvaluator:
             tool_ids=tool_ids,
             journey_state_propositions=journey_state_proposition,
             properties_proposition=properties_proposition,
+            signal_proposition=signal_proposition,
+            title=title,
+            agent_id=agent_id,
         )
 
         if cached_evaluation := await self._guideline_collection.find_one({"id": {"$eq": _hash}}):
@@ -753,6 +768,7 @@ class _CachedEvaluator:
 
             return self.GuidelineEvaluation(
                 properties=cached_evaluation["properties"],
+                signals=cached_evaluation.get("signals", []),
             )
 
         self._logger.trace(
@@ -767,12 +783,16 @@ class _CachedEvaluator:
                         content=GuidelineContent(
                             condition=g.condition,
                             action=g.action,
+                            description=g.description,
                         ),
                         tool_ids=tool_ids,
                         operation=PayloadOperation.ADD,
                         action_proposition=action_proposition,
                         properties_proposition=properties_proposition,
                         journey_node_proposition=journey_state_proposition,
+                        signal_proposition=signal_proposition,
+                        title=title,
+                        agent_id=agent_id,
                     ),
                 )
             ],
@@ -815,12 +835,16 @@ class _CachedEvaluator:
                     "version": Version.String(VERSION),
                     "properties": cast(InvoiceGuidelineData, invoice.data).properties_proposition
                     or {},
+                    "signals": list(
+                        cast(InvoiceGuidelineData, invoice.data).signals_proposition or []
+                    ),
                 }
             )
 
             # Return the evaluation result
             return self.GuidelineEvaluation(
                 properties=cast(InvoiceGuidelineData, invoice.data).properties_proposition or {},
+                signals=cast(InvoiceGuidelineData, invoice.data).signals_proposition or [],
             )
 
     async def evaluate_journey(
@@ -3256,6 +3280,7 @@ class Agent:
             on_message=on_message,
             labels=labels,
             priority=priority,
+            agent_id=self.id,
         )
 
         await self.attach_journey(journey)
@@ -3297,6 +3322,61 @@ class Agent:
             journey.id,
             _Tag.for_agent_id(self.id).id,
         )
+
+    async def create_policy(
+        self,
+        title: str | None = None,
+        content: str | None = None,
+        tools: Iterable[ToolRef] = [],
+        metadata: dict[str, JSONSerializable] = {},
+        canned_responses: Sequence[CannedResponseId] = [],
+        criticality: Criticality = Criticality.MEDIUM,
+        composition_mode: CompositionMode | None = None,
+        effort: Effort | None = None,
+        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        | None = None,
+        on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
+        on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
+        canned_response_field_provider: Callable[[EngineContext], Awaitable[Mapping[str, Any]]]
+        | None = None,
+        tags: Sequence[Tag] = [],
+        id: GuidelineId | None = None,
+        track: bool = True,
+        labels: Iterable[str] = (),
+        dependencies: Sequence[Guideline | Journey] = [],
+        priority: int = 0,
+        signals: Sequence[str] = [],
+    ) -> Guideline:
+        """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
+        guideline = await self._server._create_guideline(
+            condition=None,
+            action=None,
+            description=content,
+            title=title,
+            tools=tools,
+            metadata=metadata,
+            canned_responses=canned_responses,
+            criticality=criticality,
+            composition_mode=composition_mode,
+            effort=effort,
+            matcher=matcher,
+            on_selected=on_selected,
+            on_message=on_message,
+            canned_response_field_provider=canned_response_field_provider,
+            tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
+            relationship_target_tag_id=None,
+            id=id,
+            track=track,
+            labels=labels,
+            priority=priority,
+            signals=signals,
+            agent_id=self.id,
+        )
+
+        if dependencies:
+            await guideline.depend_on(*dependencies)
+
+        return guideline
 
     async def create_guideline(
         self,
@@ -3347,6 +3427,7 @@ class Agent:
             labels=labels,
             priority=priority,
             signals=signals,
+            agent_id=self.id,
         )
 
         if dependencies:
@@ -3427,6 +3508,7 @@ class Agent:
             guideline.id,
             GuidelineContent(condition=condition, action=None),
             [tool_id],
+            agent_id=self.id,
         )
 
         await self._store_provider.get_store(
@@ -4220,9 +4302,11 @@ class Server:
         guideline_id: GuidelineId,
         guideline_content: GuidelineContent,
         tool_ids: Sequence[ToolId],
+        title: str | None = None,
+        agent_id: AgentId | None = None,
     ) -> None:
         self._guideline_evaluations[guideline_id] = (
-            (guideline_id, guideline_content, tool_ids),
+            (guideline_id, guideline_content, tool_ids, title, agent_id),
             self._evaluator.evaluate_guideline,
         )
 
@@ -4288,13 +4372,9 @@ class Server:
         labels: Iterable[str] = (),
         priority: int = 0,
         signals: Sequence[str] = [],
+        agent_id: AgentId | None = None,
     ) -> Guideline:
         """Internal method to create a guideline with common logic."""
-        if condition is None and matcher is None and action is None:
-            raise SDKError(
-                "Either condition, matcher, or action must be specified to create a guideline."
-            )
-
         self._advance_creation_progress()
 
         tools_list = list(tools)
@@ -4336,8 +4416,10 @@ class Server:
         if matcher is None:
             self._add_guideline_evaluation(
                 guideline.id,
-                GuidelineContent(condition=condition or "", action=action),
+                GuidelineContent(condition=condition or "", action=action, description=description),
                 tool_ids,
+                title=title,
+                agent_id=agent_id,
             )
 
         # Create relationship if target tag specified
@@ -4440,6 +4522,9 @@ class Server:
         guideline = await self._store_provider.get_store(
             GuidelineStore, StoreProviderHints(call_site="sdk")
         ).read_guideline(guideline_id)
+
+        if guideline.title:
+            return guideline.title
 
         return f"When {guideline.content.condition}" + (
             f", then {guideline.content.action}" if guideline.content.action else ""
@@ -4770,6 +4855,30 @@ class Server:
                     key=key,
                     value=value,
                 )
+
+            generated_signals = list(cast(_CachedEvaluator.GuidelineEvaluation, result).signals)
+            if generated_signals:
+                merged_signals: list[str] = []
+                seen_signals: set[str] = set()
+
+                for signal in [*guideline.signals, *generated_signals]:
+                    if not (clean := signal.strip()):
+                        continue
+
+                    key = clean.casefold()
+                    if key in seen_signals:
+                        continue
+
+                    seen_signals.add(key)
+                    merged_signals.append(clean)
+
+                if list(guideline.signals) != merged_signals:
+                    await self._store_provider.get_store(
+                        GuidelineStore, StoreProviderHints(call_site="sdk")
+                    ).update_guideline(
+                        guideline_id=cast(GuidelineId, entity_id),
+                        params={"signals": merged_signals},
+                    )
 
         elif entity_type == "journey":
             # Store evaluation results on Journey.node_properties (not
@@ -5250,6 +5359,7 @@ class Server:
         on_message: Callable[[EngineContext, JourneyMatch], Awaitable[None]] | None = None,
         labels: Iterable[str] = (),
         priority: int = 0,
+        agent_id: AgentId | None = None,
     ) -> Journey:
         """Creates a new journey with the specified title, description, and triggers."""
 
@@ -5270,6 +5380,7 @@ class Server:
                 guideline.id,
                 GuidelineContent(condition=str_trigger, action=None),
                 tool_ids=[],
+                agent_id=agent_id,
             )
 
             trigger_guidelines.append(

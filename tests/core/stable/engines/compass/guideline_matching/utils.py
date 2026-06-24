@@ -58,6 +58,7 @@ def create_guideline(
     action: str | None = None,
     *,
     description: str | None = None,
+    title: str | None = None,
     tags: list[TagId] = [],
 ) -> Guideline:
     """Build a standalone ``Guideline`` (no store) for unit tests."""
@@ -70,6 +71,7 @@ def create_guideline(
         enabled=True,
         tags=tags,
         metadata={},
+        title=title,
     )
 
 

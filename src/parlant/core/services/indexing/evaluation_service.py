@@ -61,6 +61,10 @@ from parlant.core.services.indexing.guideline_continuous_proposer import (
     GuidelineContinuousProposer,
     GuidelineContinuousProposition,
 )
+from parlant.core.services.indexing.guideline_signal_proposer import (
+    GuidelineSignalProposer,
+    GuidelineSignalProposition,
+)
 from parlant.core.loggers import Logger
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.services.indexing.journey_reachable_nodes_evaluation import (
@@ -93,6 +97,7 @@ class GuidelineEvaluator:
         customer_dependent_action_detector: CustomerDependentActionDetector,
         agent_intention_proposer: AgentIntentionProposer,
         tool_running_action_detector: ToolRunningActionDetector,
+        guideline_signal_proposer: GuidelineSignalProposer,
     ) -> None:
         self._logger = logger
         self._entity_queries = entity_queries
@@ -101,6 +106,7 @@ class GuidelineEvaluator:
         self._customer_dependent_action_detector = customer_dependent_action_detector
         self._agent_intention_proposer = agent_intention_proposer
         self._tool_running_action_detector = tool_running_action_detector
+        self._guideline_signal_proposer = guideline_signal_proposer
 
     def _build_invoice_data(
         self,
@@ -111,6 +117,7 @@ class GuidelineEvaluator:
         ],
         agent_intention_propositions: Sequence[Optional[AgentIntentionProposition]],
         tool_running_action_propositions: Sequence[Optional[ToolRunningActionProposition]],
+        signal_propositions: Sequence[Optional[GuidelineSignalProposition]],
     ) -> Sequence[InvoiceGuidelineData]:
         results = []
         for (
@@ -119,12 +126,14 @@ class GuidelineEvaluator:
             payload_customer_dependent,
             agent_intention,
             tool_running_action,
+            signal_proposition,
         ) in zip(
             action_propositions,
             continuous_propositions,
             customer_dependant_action_detections,
             agent_intention_propositions,
             tool_running_action_propositions,
+            signal_propositions,
         ):
             properties_prop: dict[str, JSONSerializable] = {
                 **{
@@ -148,6 +157,7 @@ class GuidelineEvaluator:
 
             invoice_data = InvoiceGuidelineData(
                 properties_proposition=properties_prop,
+                signals_proposition=signal_proposition.signals if signal_proposition else None,
             )
 
             results.append(invoice_data)
@@ -182,12 +192,19 @@ class GuidelineEvaluator:
             payloads, progress_report
         )
 
+        signal_propositions = await self._propose_signals(
+            payloads,
+            action_propositions,
+            progress_report,
+        )
+
         return self._build_invoice_data(
             action_propositions,
             continuous_propositions,
             customer_dependant_action_detections,
             agent_intention_propositions,
             tool_running_action_propositions,
+            signal_propositions,
         )
 
     async def _propose_actions(
@@ -346,6 +363,56 @@ class GuidelineEvaluator:
 
         sparse_results = await async_utils.safe_gather(*tasks)
         results: list[Optional[ToolRunningActionProposition]] = [None] * len(payloads)
+
+        for i, res in zip(indices, sparse_results):
+            results[i] = res
+
+        return results
+
+    async def _propose_signals(
+        self,
+        payloads: Sequence[GuidelinePayload],
+        proposed_actions: Sequence[Optional[GuidelineActionProposition]],
+        progress_report: Optional[ProgressReport] = None,
+    ) -> Sequence[Optional[GuidelineSignalProposition]]:
+        tasks: list[asyncio.Task[GuidelineSignalProposition]] = []
+        indices: list[int] = []
+
+        for i, (p, action_prop) in enumerate(zip(payloads, proposed_actions)):
+            if not p.signal_proposition:
+                continue
+
+            action_to_use = (
+                action_prop.content.action if action_prop is not None else p.content.action
+            )
+            guideline_content = GuidelineContent(
+                condition=p.content.condition,
+                action=action_to_use,
+                description=p.content.description,
+            )
+
+            agent = await self._entity_queries.read_agent(p.agent_id) if p.agent_id else None
+            glossary_terms = (
+                await self._entity_queries.list_glossary_terms_for_context(p.agent_id)
+                if p.agent_id
+                else []
+            )
+
+            tasks.append(
+                asyncio.create_task(
+                    self._guideline_signal_proposer.propose_signals(
+                        guideline=guideline_content,
+                        title=p.title or "Untitled Guideline",
+                        agent=agent,
+                        glossary_terms=glossary_terms,
+                        progress_report=progress_report,
+                    )
+                )
+            )
+            indices.append(i)
+
+        sparse_results = await async_utils.safe_gather(*tasks)
+        results: list[Optional[GuidelineSignalProposition]] = [None] * len(payloads)
 
         for i, res in zip(indices, sparse_results):
             results[i] = res
@@ -691,6 +758,7 @@ class EvaluationService:
         customer_dependent_action_detector: CustomerDependentActionDetector,
         agent_intention_proposer: AgentIntentionProposer,
         tool_running_action_detector: ToolRunningActionDetector,
+        guideline_signal_proposer: GuidelineSignalProposer,
         relative_action_proposer: RelativeActionProposer,
         journey_reachable_node_evaluator: JourneyReachableNodesEvaluator,
         store_provider: StoreProvider,
@@ -707,6 +775,7 @@ class EvaluationService:
             customer_dependent_action_detector=customer_dependent_action_detector,
             agent_intention_proposer=agent_intention_proposer,
             tool_running_action_detector=tool_running_action_detector,
+            guideline_signal_proposer=guideline_signal_proposer,
         )
 
         self._journey_evaluator = JourneyEvaluator(

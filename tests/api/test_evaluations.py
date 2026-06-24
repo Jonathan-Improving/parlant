@@ -304,6 +304,50 @@ async def test_that_payload_proposition_flags_are_correctly_returned_in_invoice(
     payload_guideline = invoice["payload"]["guideline"]
     assert payload_guideline["action_proposition"] is True
     assert payload_guideline["properties_proposition"] is False
+    assert payload_guideline["signal_proposition"] is False
+
+
+async def test_that_signal_proposition_is_evaluated(
+    async_client: httpx.AsyncClient,
+) -> None:
+    response = await async_client.post(
+        "/evaluations",
+        json={
+            "payloads": [
+                {
+                    "kind": "guideline",
+                    "guideline": {
+                        "content": {
+                            "condition": "the customer wants to report a lost card",
+                            "action": "help them secure the card",
+                            "description": "Prioritize urgent account protection.",
+                        },
+                        "title": "Lost Card",
+                        "operation": "add",
+                        "signal_proposition": True,
+                        "tool_ids": [],
+                    },
+                }
+            ],
+        },
+    )
+    assert response.status_code == status.HTTP_201_CREATED
+
+    evaluation_id = response.raise_for_status().json()["id"]
+
+    content = (await async_client.get(f"/evaluations/{evaluation_id}")).raise_for_status().json()
+
+    assert content["status"] == "completed"
+    assert len(content["invoices"]) == 1
+
+    invoice = content["invoices"][0]
+    assert invoice["approved"]
+    assert invoice["payload"]["guideline"]["signal_proposition"] is True
+
+    signals = invoice["data"]["guideline"]["signals_proposition"]
+    assert isinstance(signals, list)
+    assert signals
+    assert all(isinstance(signal, str) and signal for signal in signals)
 
 
 async def test_that_error_is_returned_when_no_propositions_are_provided_in_a_payload(
@@ -336,7 +380,7 @@ async def test_that_error_is_returned_when_no_propositions_are_provided_in_a_pay
     assert "detail" in data
     assert (
         data["detail"]
-        == "At least one of action_proposition, properties_proposition or journey_node_proposition must be enabled"
+        == "At least one of action_proposition, properties_proposition, journey_node_proposition or signal_proposition must be enabled"
     )
 
 
@@ -372,5 +416,5 @@ async def test_that_error_is_returned_when_all_propositions_are_disabled_in_a_pa
     assert "detail" in data
     assert (
         data["detail"]
-        == "At least one of action_proposition, properties_proposition or journey_node_proposition must be enabled"
+        == "At least one of action_proposition, properties_proposition, journey_node_proposition or signal_proposition must be enabled"
     )

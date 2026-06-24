@@ -446,7 +446,7 @@ class Matcher:
                 g = recall_result.guideline
 
                 recall_results.write(
-                    f"### {idx} [Score: {recall_result.score:.2f} ({'Relevant' if recall_result.is_relevant else 'Not Relevant'})]\n\n"
+                    f"### {idx} {g.title or ''} [Score: {recall_result.score:.2f} ({'Relevant' if recall_result.is_relevant else 'Not Relevant'})]\n\n"
                 )
                 if g.content.condition:
                     recall_results.write(f"    Condition: {g.content.condition}\n")
@@ -470,7 +470,7 @@ class Matcher:
                 g = rank_result.guideline
 
                 ranking_results.write(
-                    f"### {idx} [Score: {rank_result.score:.2f} ({'Relevant' if rank_result.is_relevant else 'Not Relevant'})]\n\n"
+                    f"### {idx} {g.title or ''} [Score: {rank_result.score:.2f} ({'Relevant' if rank_result.is_relevant else 'Not Relevant'})]\n\n"
                 )
                 if g.content.condition:
                     ranking_results.write(f"    Condition: {g.content.condition}\n")
@@ -492,7 +492,7 @@ class Matcher:
                 g = distill_result.guideline
 
                 distillation_results.write(
-                    f"### {idx} [{'Relevant' if distill_result.is_relevant else 'Not Relevant'}]\n\n"
+                    f"### {idx} {g.title or ''} [{'Relevant' if distill_result.is_relevant else 'Not Relevant'}]\n\n"
                 )
                 if g.content.condition:
                     distillation_results.write(f"    Condition: {g.content.condition}\n")
@@ -577,9 +577,7 @@ class Matcher:
         *,
         append: bool,
     ) -> None:
-        turn_matches = [
-            match for match in matches if match[1] == _ContextUsage.MATCH_CURRENT_TURN
-        ]
+        turn_matches = [match for match in matches if match[1] == _ContextUsage.MATCH_CURRENT_TURN]
 
         # Classify into ordinary vs tool-enabled (the latter carries the tool ids
         # the matched guidelines enable).

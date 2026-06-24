@@ -159,6 +159,10 @@ from parlant.core.services.indexing.guideline_continuous_proposer import (
     GuidelineContinuousProposer,
     GuidelineContinuousPropositionSchema,
 )
+from parlant.core.services.indexing.guideline_signal_proposer import (
+    GuidelineSignalProposer,
+    GuidelineSignalPropositionSchema,
+)
 from parlant.core.services.indexing.relative_action_proposer import (
     RelativeActionProposer,
     RelativeActionSchema,
@@ -538,6 +542,7 @@ async def container(
             overlapping_tools_batch.OverlappingToolsBatchSchema,
             GuidelineActionPropositionSchema,
             GuidelineContinuousPropositionSchema,
+            GuidelineSignalPropositionSchema,
             CustomerDependentActionSchema,
             ToolRunningActionSchema,
             GenericResponseAnalysisSchema,
@@ -583,6 +588,7 @@ async def container(
 
         container[GuidelineActionProposer] = Singleton(GuidelineActionProposer)
         container[GuidelineContinuousProposer] = Singleton(GuidelineContinuousProposer)
+        container[GuidelineSignalProposer] = Singleton(GuidelineSignalProposer)
         container[CustomerDependentActionDetector] = Singleton(CustomerDependentActionDetector)
         container[AgentIntentionProposer] = Singleton(AgentIntentionProposer)
         container[ToolRunningActionDetector] = Singleton(ToolRunningActionDetector)

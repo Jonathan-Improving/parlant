@@ -287,7 +287,7 @@ class GuidelineRanker:
 
         formatted_shot += f"""
 - **Guideline**:
-{_format_guideline(shot.guideline.condition, shot.guideline.action)}
+{_format_guideline(None, shot.guideline.condition, shot.guideline.action, shot.guideline.description)}
 
 """
 
@@ -346,6 +346,7 @@ class GuidelineRanker:
 """,
             props={
                 "guideline_text": _format_guideline(
+                    guideline.title,
                     guideline.content.condition,
                     guideline.content.action,
                     guideline.content.description,
@@ -372,7 +373,8 @@ class GuidelineRanker:
 # GENERAL INSTRUCTIONS
 
 In our system, a conversational multi-turn AI agent's behavior is controlled by a set of guidelines.
-Each guideline is comprised of a condition and potentially an action. Whenever a condition applies - the agent is directed to take its associated action.
+Some guidelines are condition/action instructions: when the condition applies, the agent is directed to take its associated action.
+Other guidelines are policy-style instructions: they may have no condition or action, and their title and policy text describe the rule, constraint, or information that may govern the conversation.
 """,
             props={},
         )
@@ -381,12 +383,12 @@ Each guideline is comprised of a condition and potentially an action. Whenever a
             template="""
 # Task Description
 
-Act as a first-pass filter to screen out clearly irrelevant guidelines based on their conditions. You are NOT making the final determination - a human judge will review every condition that isn't clearly irrelevant and decide whether it actually applies.
+Act as a first-pass filter to screen out clearly irrelevant guidelines. You are NOT making the final determination - a human judge will review every guideline that isn't clearly irrelevant and decide whether it actually applies.
 
-Output an integer score from 1 to 5 indicating how relevant the guideline's condition is to the most recent state of the conversation:
+Output an integer score from 1 to 5 indicating how relevant the guideline is to the most recent state of the conversation:
 - 1 - not relevant at all, at no point in the conversation
 - 2 - only very loosely related to the subject of the conversation
-- 3 - partially relevant: was previously relevant but not clearly right now, or only part of the condition matches
+- 3 - partially relevant: was previously relevant but not clearly right now, or only part of the guideline matches
 - 4 - requires further checking by the human: a partial match, but one that clearly justifies further inspection
 - 5 - clearly matches
 
@@ -395,11 +397,12 @@ Scores of 1 and 2 mean the guideline will be filtered out for sure; 3 means mayb
 You will be given the context of the customer, the interaction so far (including tool calls and results), contextual information (variables) about the customer and the current interaction session, and other information. You shall use all of that information to evaluate the relevance of the guideline to the current state of the interaction, but you should focus more on the most recent state of the interaction.
 
 Important considerations:
-1. Focus on recency: Evaluate conditions based on the latest part of the conversation, particularly the most recent customer message.
-2. Semantic evaluation: Assess the actual meaning of conditions, not just keyword matching.
+1. Focus on recency: Evaluate relevance based on the latest part of the conversation, particularly the most recent customer message.
+2. Semantic evaluation: Assess the actual meaning of the guideline, not just keyword matching.
 3. Context matters: Consider the full context and intent behind the user's message, including tool results, context variables, capabilities etc'.
-4. Ignore action: The action is only provided for you to contextualize the condition. Do not make your determination based on whether the action has occured. Only evaluate the condition.
-5. Match based on entire context: a guideline may be matched based on the entire context of the interaction. It may be relevant even if it has nothing to do with the latest customer message.
+4. For condition/action guidelines, do not rank solely because the action sounds useful; rank by whether the condition applies. The action and details may be used to interpret the condition.
+5. For policy-style guidelines without a condition, rank by whether the title and policy/details text govern the current situation, the customer's request, the agent's next response, or a tool/result currently in play.
+6. Match based on entire context: a guideline may be matched based on the entire context of the interaction. It may be relevant even if it has nothing to do with the latest customer message.
 """,
             props={},
         )
@@ -500,7 +503,7 @@ Important considerations:
 
         if self._should_include_tldr(context):
             result["tldr"] = (
-                "<A brief, one-line summary of why the guideline's condition is or "
+                "<A brief, one-line summary of why the guideline is or "
                 "isn't relevant to the most recent state of the interaction>"
             )
 
@@ -511,15 +514,34 @@ Important considerations:
         return json.dumps(result, indent=4)
 
 
-def _format_guideline(condition: str, action: str | None, description: str | None = None) -> str:
-    # The action is optional and only present to contextualize the condition; omit
-    # it entirely when absent rather than rendering "Action: None".
-    text = f"Condition: {condition}."
-    if action:
-        text += f" Action: {action}"
+def _format_guideline(
+    title: str | None,
+    condition: str,
+    action: str | None,
+    description: str | None = None,
+) -> str:
+    title = (title or "").strip()
+    condition = (condition or "").strip()
+    action = (action or "").strip()
+    description = (description or "").strip()
+
+    sections: list[str] = []
+
+    if title:
+        sections.append(f"Title: {title}")
+
+    if condition and action:
+        sections.append(f"When: {condition}\nThen: {action}")
+    elif condition:
+        sections.append(f"Condition: {condition}")
+    elif action:
+        sections.append(f"Action: {action}")
+
     if description:
-        text += f" Detailed Instructions: {description}"
-    return text
+        label = "Policy" if not condition and not action else "Details"
+        sections.append(f"{label}: {description}")
+
+    return "\n\n".join(sections)
 
 
 def _make_event(e_id: str, source: EventSource, message: str) -> Event:

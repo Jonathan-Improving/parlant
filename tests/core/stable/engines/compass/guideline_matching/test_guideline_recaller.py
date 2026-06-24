@@ -22,7 +22,7 @@ from pytest import fixture
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.engines.engine_context import EngineContext
-from parlant.core.guidelines import Guideline
+from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.nlp.embedding import Embedder, EmbeddingCache, EmbeddingResult, NullEmbeddingCache
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.sessions import EventSource
@@ -288,6 +288,43 @@ async def test_that_the_recaller_embeds_policy_signals() -> None:
 
     relevance_by_id = {r.guideline.id: r.is_relevant for r in result.recalled_guidelines}
     assert relevance_by_id[refund.id]
+
+
+def test_that_the_recaller_formats_description_only_policy_guideline() -> None:
+    recaller = _radar_recaller()
+    guideline = replace(
+        create_guideline(condition="", action=None, tags=[]),
+        title="Refund Policy",
+        content=GuidelineContent(
+            condition="",
+            action=None,
+            description="Refunds are allowed within 30 days.",
+        ),
+    )
+
+    assert recaller._guideline_embedding_content(guideline) == (
+        "# Refund Policy\n\n"
+        "Refunds are allowed within 30 days."
+    )
+
+
+def test_that_the_recaller_embeds_policy_guideline_text_and_signals() -> None:
+    recaller = _radar_recaller()
+    guideline = replace(
+        create_guideline(condition="", action=None, tags=[]),
+        title="Refund Policy",
+        content=GuidelineContent(
+            condition="",
+            action=None,
+            description="Refunds are allowed within 30 days.",
+        ),
+        signals=["I want my money back"],
+    )
+
+    assert recaller._list_guideline_contents(guideline) == [
+        "# Refund Policy\n\nRefunds are allowed within 30 days.",
+        "I want my money back",
+    ]
 
 
 async def test_that_the_recaller_reuses_the_cached_policy_frame() -> None:

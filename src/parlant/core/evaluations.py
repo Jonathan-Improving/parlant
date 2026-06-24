@@ -83,6 +83,9 @@ class GuidelinePayload:
     action_proposition: bool
     properties_proposition: bool
     journey_node_proposition: bool
+    signal_proposition: bool = False
+    title: Optional[str] = None
+    agent_id: Optional[AgentId] = None
     updated_id: Optional[GuidelineId] = None
 
     def __repr__(self) -> str:
@@ -106,6 +109,7 @@ class PayloadDescriptor(NamedTuple):
 @dataclass(frozen=True)
 class InvoiceGuidelineData:
     properties_proposition: Optional[dict[str, JSONSerializable]]
+    signals_proposition: Optional[Sequence[str]] = None
     _type: Literal["guideline"] = "guideline"  # Union discriminator for Pydantic
 
 
@@ -192,9 +196,10 @@ class EvaluationStore(ABC):
     ) -> None: ...
 
 
-class GuidelineContentDocument(TypedDict):
+class GuidelineContentDocument(TypedDict, total=False):
     condition: str
     action: Optional[str]
+    description: Optional[str]
 
 
 class GuidelinePayloadDocument_v0_1_0(TypedDict):
@@ -236,6 +241,9 @@ class GuidelinePayloadDocument(TypedDict):
     action_proposition: bool
     properties_proposition: bool
     journey_node_proposition: bool
+    signal_proposition: bool
+    title: Optional[str]
+    agent_id: Optional[AgentId]
 
 
 class JourneyPayloadDocument(TypedDict):
@@ -301,6 +309,7 @@ _InvoiceDataDocument_v0_4_0 = Union[InvoiceGuidelineDataDocument_v0_4_0, Invoice
 
 class InvoiceGuidelineDataDocument(TypedDict):
     properties_proposition: Optional[dict[str, JSONSerializable]]
+    signals_proposition: Optional[Sequence[str]]
 
 
 _InvoiceDataDocument = Union[InvoiceGuidelineDataDocument, InvoiceJourneyDataDocument]
@@ -653,6 +662,9 @@ class EvaluationDocumentStore(EvaluationStore):
                 properties_proposition=(
                     data.properties_proposition if data.properties_proposition is not None else None
                 ),
+                signals_proposition=(
+                    data.signals_proposition if data.signals_proposition is not None else None
+                ),
             )
 
         def serialize_invoice_journey_data(
@@ -669,6 +681,7 @@ class EvaluationDocumentStore(EvaluationStore):
                     content=GuidelineContentDocument(
                         condition=payload.content.condition,
                         action=payload.content.action or None,
+                        description=payload.content.description or None,
                     ),
                     tool_ids=payload.tool_ids,
                     action=payload.operation.value,
@@ -676,6 +689,9 @@ class EvaluationDocumentStore(EvaluationStore):
                     action_proposition=payload.action_proposition,
                     properties_proposition=payload.properties_proposition,
                     journey_node_proposition=payload.journey_node_proposition,
+                    signal_proposition=payload.signal_proposition,
+                    title=payload.title,
+                    agent_id=payload.agent_id,
                 )
             elif isinstance(payload, JourneyPayload):
                 return JourneyPayloadDocument(
@@ -736,6 +752,7 @@ class EvaluationDocumentStore(EvaluationStore):
             return GuidelineContent(
                 condition=gc_doc["condition"],
                 action=gc_doc["action"],
+                description=gc_doc.get("description"),
             )
 
         def deserialize_invoice_guideline_data(
@@ -747,6 +764,7 @@ class EvaluationDocumentStore(EvaluationStore):
                     if data_doc["properties_proposition"] is not None
                     else None
                 ),
+                signals_proposition=data_doc.get("signals_proposition"),
             )
 
         def deserialize_payload_document(
@@ -760,6 +778,7 @@ class EvaluationDocumentStore(EvaluationStore):
                     content=GuidelineContent(
                         condition=payload_doc["content"]["condition"],
                         action=payload_doc["content"]["action"] or None,
+                        description=payload_doc["content"].get("description"),
                     ),
                     tool_ids=payload_doc["tool_ids"],
                     operation=PayloadOperation(payload_doc["action"]),
@@ -767,6 +786,9 @@ class EvaluationDocumentStore(EvaluationStore):
                     action_proposition=payload_doc["action_proposition"],
                     properties_proposition=payload_doc["properties_proposition"],
                     journey_node_proposition=payload_doc["journey_node_proposition"],
+                    signal_proposition=payload_doc.get("signal_proposition", False),
+                    title=payload_doc.get("title"),
+                    agent_id=payload_doc.get("agent_id"),
                 )
             elif kind == PayloadKind.JOURNEY:
                 payload_doc = cast(JourneyPayloadDocument, payload_doc)

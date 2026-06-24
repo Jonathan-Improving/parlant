@@ -31,6 +31,7 @@ from parlant.api.common import (
     apigen_config,
     operation_dto_to_operation,
 )
+from parlant.core.agents import AgentId
 from parlant.core.application import Application
 from parlant.core.async_utils import Timeout
 from parlant.core.common import DefaultBaseModel
@@ -93,6 +94,22 @@ GuidelinePayloadJourneyNodePropositionField: TypeAlias = Annotated[
     ),
 ]
 
+GuidelinePayloadSignalPropositionField: TypeAlias = Annotated[
+    bool,
+    Field(
+        description="Signals proposition",
+        examples=[True],
+    ),
+]
+
+EvaluationAgentIdField: TypeAlias = Annotated[
+    AgentId,
+    Field(
+        description="Agent context to use when evaluating agent-dependent propositions such as guideline signals.",
+        examples=["agent_123xz"],
+    ),
+]
+
 guideline_payload_example: ExampleJson = {
     "content": {
         "condition": "User asks about product pricing",
@@ -116,9 +133,12 @@ class GuidelinePayloadDTO(
     tool_ids: Sequence[ToolIdDTO]
     operation: GuidelinePayloadOperationDTO
     updated_id: GuidelineIdField | None = None
+    title: common.GuidelineTitleField | None = None
+    agent_id: EvaluationAgentIdField | None = None
     action_proposition: GuidelinePayloadActionPropositionField = False
     properties_proposition: GuidelinePayloadPropertiesPropositionField = False
     journey_node_proposition: GuidelinePayloadJourneyNodePropositionField = False
+    signal_proposition: GuidelinePayloadSignalPropositionField = False
 
 
 payload_example: ExampleJson = {
@@ -237,6 +257,7 @@ class GuidelineInvoiceDataDTO(
 
     action_proposition: ActionPropositionField | None = None
     properties_proposition: PropertiesPropositionField | None = None
+    signals_proposition: Sequence[str] | None = None
 
 
 invoice_data_example: ExampleJson = {"guideline": guideline_invoice_data_example}
@@ -271,7 +292,7 @@ class InvoiceDTO(
     error: ErrorField | None = None
 
 
-def _payload_from_dto(dto: PayloadDTO) -> Payload:
+def _payload_from_dto(dto: PayloadDTO, agent_id: AgentId | None = None) -> Payload:
     if dto.kind == PayloadKindDTO.GUIDELINE:
         if not dto.guideline:
             raise HTTPException(
@@ -283,16 +304,18 @@ def _payload_from_dto(dto: PayloadDTO) -> Payload:
             not dto.guideline.action_proposition
             and not dto.guideline.properties_proposition
             and not dto.guideline.journey_node_proposition
+            and not dto.guideline.signal_proposition
         ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="At least one of action_proposition, properties_proposition or journey_node_proposition must be enabled",
+                detail="At least one of action_proposition, properties_proposition, journey_node_proposition or signal_proposition must be enabled",
             )
 
         return GuidelinePayload(
             content=GuidelineContent(
                 condition=dto.guideline.content.condition,
                 action=dto.guideline.content.action,
+                description=dto.guideline.content.description,
             ),
             tool_ids=[
                 ToolId(service_name=t.service_name, tool_name=t.tool_name)
@@ -300,9 +323,12 @@ def _payload_from_dto(dto: PayloadDTO) -> Payload:
             ],
             operation=operation_dto_to_operation(dto.guideline.operation),
             updated_id=dto.guideline.updated_id,
+            title=dto.guideline.title,
+            agent_id=dto.guideline.agent_id or agent_id,
             action_proposition=dto.guideline.action_proposition,
             properties_proposition=dto.guideline.properties_proposition,
             journey_node_proposition=dto.guideline.journey_node_proposition,
+            signal_proposition=dto.guideline.signal_proposition,
         )
 
     raise HTTPException(
@@ -331,6 +357,7 @@ def _payload_descriptor_to_dto(descriptor: PayloadDescriptor) -> PayloadDTO:
                 content=GuidelineContentDTO(
                     condition=cast(GuidelinePayload, descriptor.payload).content.condition,
                     action=cast(GuidelinePayload, descriptor.payload).content.action,
+                    description=cast(GuidelinePayload, descriptor.payload).content.description,
                 ),
                 tool_ids=[
                     ToolIdDTO(service_name=t.service_name, tool_name=t.tool_name)
@@ -338,6 +365,8 @@ def _payload_descriptor_to_dto(descriptor: PayloadDescriptor) -> PayloadDTO:
                 ],
                 operation=_operation_to_operation_dto(descriptor.payload.operation),
                 updated_id=cast(GuidelinePayload, descriptor.payload).updated_id,
+                title=cast(GuidelinePayload, descriptor.payload).title,
+                agent_id=cast(GuidelinePayload, descriptor.payload).agent_id,
                 action_proposition=cast(GuidelinePayload, descriptor.payload).action_proposition,
                 properties_proposition=cast(
                     GuidelinePayload, descriptor.payload
@@ -345,6 +374,7 @@ def _payload_descriptor_to_dto(descriptor: PayloadDescriptor) -> PayloadDTO:
                 journey_node_proposition=cast(
                     GuidelinePayload, descriptor.payload
                 ).journey_node_proposition,
+                signal_proposition=cast(GuidelinePayload, descriptor.payload).signal_proposition,
             ),
         )
 
@@ -367,6 +397,7 @@ def _invoice_data_to_dto(
             guideline=GuidelineInvoiceDataDTO(
                 action_proposition=action_proposition,
                 properties_proposition=guideline_data.properties_proposition,
+                signals_proposition=guideline_data.signals_proposition,
             ),
         )
 
@@ -400,6 +431,7 @@ class EvaluationCreationParamsDTO(
 ):
     """Parameters for creating a new evaluation task"""
 
+    agent_id: EvaluationAgentIdField | None = None
     payloads: Sequence[PayloadDTO]
 
 
@@ -549,7 +581,7 @@ def create_router(
 
         try:
             evaluation = await app.evaluations.create(
-                payloads=[_payload_from_dto(p) for p in params.payloads]
+                payloads=[_payload_from_dto(p, params.agent_id) for p in params.payloads]
             )
 
         except EvaluationValidationError as exc:

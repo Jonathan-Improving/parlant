@@ -76,6 +76,7 @@ class GuidelineDistillationShot(Shot):
     # The distiller evaluates a single guideline per prompt, so each shot carries one.
     guideline: GuidelineContent
     expected_result: HighEffortGuidelineDistillationSchema
+    title: str | None = None
 
 
 class GuidelineDistiller:
@@ -306,7 +307,12 @@ class GuidelineDistiller:
 
         formatted_shot += f"""
 - **Guideline**:
-{_format_guideline(shot.guideline.condition, shot.guideline.action, shot.guideline.description)}
+{_format_guideline(
+            shot.title,
+            shot.guideline.condition,
+            shot.guideline.action,
+            shot.guideline.description,
+        )}
 
 """
 
@@ -406,6 +412,7 @@ Before concluding that a step was already carried out, confirm it actually happe
 """,
             props={
                 "guideline_text": _format_guideline(
+                    guideline.title,
                     guideline.content.condition,
                     guideline.content.action,
                     guideline.content.description,
@@ -624,30 +631,85 @@ def _readable_tool_spec(tool_id: ToolId, tool: Tool) -> dict[str, JSONSerializab
 
 
 def _format_guideline(
+    title: str | None,
     condition: str,
     action: Optional[str],
     description: Optional[str],
     tools: Set[tuple[ToolId, Tool]] = set(),
 ) -> str:
-    # The action is optional and only present to contextualize the condition; omit it
-    # entirely when absent rather than rendering "Action: None".
-    text = f"Condition: {condition}."
-    if action:
-        text += f" Action: {action}"
+    title = (title or "").strip()
+    condition = (condition or "").strip()
+    action = (action or "").strip()
+    description = (description or "").strip()
+
+    if title and not condition and not action:
+        text = (
+            "Condition: the customer's current request or situation is governed by "
+            f"the {title} policy. Action: apply the policy."
+        )
+        if description:
+            text += f" Details: Title: {title}\nPolicy: {description}"
+
+        if tools:
+            tools_text = json.dumps(
+                [_readable_tool_spec(tool_id, tool) for tool_id, tool in tools], indent=2
+            )
+            text += (
+                "\nThe action may be carried out (in full or in part) using the following tools. "
+                "When the next step is to run one of these tools, the distilled action should "
+                f"say so explicitly:\n{tools_text}"
+            )
+        return text
+
+    if not title:
+        text = ""
+        if condition:
+            text = f"Condition: {condition}."
+        if action:
+            text += f" Action: {action}"
+        if description:
+            label = "Details" if condition or action else "Policy"
+            text += f" {label}: {description}"
+
+        if tools:
+            tools_text = json.dumps(
+                [_readable_tool_spec(tool_id, tool) for tool_id, tool in tools], indent=2
+            )
+            text += (
+                "\nThe action may be carried out (in full or in part) using the following tools. "
+                "When the next step is to run one of these tools, the distilled action should "
+                f"say so explicitly:\n{tools_text}"
+            )
+        return text
+
+    sections: list[str] = []
+
+    sections.append(f"Title: {title}")
+
+    if condition and action:
+        sections.append(f"Condition: {condition}. Action: {action}")
+    elif condition:
+        sections.append(f"Condition: {condition}")
+    elif action:
+        sections.append(f"Action: {action}")
+
     if description:
-        text += f" Details: {description}"
+        label = "Policy" if not condition and not action else "Details"
+        sections.append(f"{label}: {description}")
+
     if tools:
         # Surface the tools attached to the action (description + arguments), so the
         # distiller knows what each tool does and can name it as the next step.
         tools_text = json.dumps(
             [_readable_tool_spec(tool_id, tool) for tool_id, tool in tools], indent=2
         )
-        text += (
+        sections.append(
             "\nThe action may be carried out (in full or in part) using the following tools. "
             "When the next step is to run one of these tools, the distilled action should "
             f"say so explicitly:\n{tools_text}"
         )
-    return text
+
+    return "\n\n".join(sections)
 
 
 def _make_event(e_id: str, source: EventSource, message: str) -> Event:

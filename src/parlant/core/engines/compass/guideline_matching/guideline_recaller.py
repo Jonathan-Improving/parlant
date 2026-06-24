@@ -19,6 +19,7 @@ from math import exp, sqrt
 from statistics import median
 import time
 
+from parlant.core.async_utils import safe_gather
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.common import xxh3_checksum
 from parlant.core.guidelines import Guideline, GuidelineId
@@ -120,8 +121,10 @@ class GuidelineRecaller:
             ]
 
         embedder = await self._nlp_service.get_embedder()
-        frame = await self._get_policy_frame(embedder, guidelines)
-        query_vectors = await self._embed_many(embedder, queries)
+        frame, query_vectors = await safe_gather(
+            self._get_policy_frame(embedder, guidelines),
+            self._embed_many(embedder, queries),
+        )
         query_directions = [
             direction
             for vector in query_vectors
@@ -182,11 +185,7 @@ class GuidelineRecaller:
             ordered_policy_contents,
         )
         centroid = self._centroid(
-            [
-                vector
-                for vectors in vectors_by_guideline.values()
-                for vector in vectors
-            ]
+            [vector for vectors in vectors_by_guideline.values() for vector in vectors]
         )
         residual_norms = [
             self._norm(self._subtract(vector, centroid))
@@ -328,28 +327,27 @@ class GuidelineRecaller:
     def _guideline_embedding_content(self, guideline: Guideline) -> str:
         content = guideline.content
 
+        title = (guideline.title or "").strip()
         condition = (content.condition or "").strip()
         action = (content.action or "").strip()
         description = (content.description or "").strip()
 
-        if guideline.title:
-            head = f"# {guideline.title}\n\n"
-        else:
-            head = ""
+        sections: list[str] = []
+
+        if title:
+            sections.append(f"# {title}")
 
         if condition and action:
-            head += f"When {condition}, then {action}"
+            sections.append(f"When {condition}, then {action}")
         elif condition:
-            head += f"Condition: {condition}"
+            sections.append(f"Condition: {condition}")
         elif action:
-            head += f"Action: {action}"
-        else:
-            raise ValueError("Guideline must have at least a condition or an action")
+            sections.append(f"Action: {action}")
 
         if description:
-            return f"{head}\n\n{description}"
+            sections.append(description)
 
-        return head
+        return "\n\n".join(sections)
 
     def _as_tuple(self, vector: Sequence[float]) -> tuple[float, ...]:
         return tuple(float(v) for v in vector)
@@ -386,8 +384,7 @@ class GuidelineRecaller:
         if self._centrality_boost_sharpness <= _EPSILON:
             return (
                 self._centrality_boost_beta
-                if residual_norm / max(median_residual_norm, _EPSILON)
-                < self._centrality_boost_tau
+                if residual_norm / max(median_residual_norm, _EPSILON) < self._centrality_boost_tau
                 else 0.0
             )
 

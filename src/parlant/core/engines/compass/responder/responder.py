@@ -248,7 +248,7 @@ In cases of conflict, prioritize the business's values and ensure your decisions
             [g for g in context.state.session_guidelines if g.criticality == Criticality.LOW]
         )
         builder.add_system_wide_guidelines(
-            context.state.session_guidelines,
+            list(context.state.session_guidelines),
             context.state.tools_by_guideline,
         )
 

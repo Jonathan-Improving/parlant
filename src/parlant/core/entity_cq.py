@@ -363,6 +363,21 @@ class EntityQueries:
             query, list(all_terms), max_terms=max_terms
         )
 
+    async def list_glossary_terms_for_context(
+        self,
+        agent_id: AgentId,
+    ) -> Sequence[Term]:
+        agent_terms = await self._glossary_store.list_terms(
+            tags=[Tag.for_agent_id(agent_id).id],
+        )
+        global_terms = await self._glossary_store.list_terms(tags=[])
+        agent = await self._agent_store.read_agent(agent_id)
+        glossary_for_agent_tags = await self._glossary_store.list_terms(
+            tags=[tag for tag in agent.tags]
+        )
+
+        return list(set(chain(agent_terms, global_terms, glossary_for_agent_tags)))
+
     async def read_tool_service(
         self,
         service_name: str,
