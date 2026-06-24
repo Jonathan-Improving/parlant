@@ -23,7 +23,7 @@ from lagom import Container, Singleton
 from pytest import fixture, Config
 import pytest
 
-from parlant.adapters.db.json_file import JSONFileDocumentDatabase
+from parlant.adapters.db.sqlite import SQLiteDocumentDatabase
 from parlant.adapters.loggers.websocket import WebSocketLogger
 from parlant.adapters.nlp.gemini_service import GeminiService
 from parlant.adapters.vector_db.transient import TransientVectorDatabase
@@ -439,7 +439,10 @@ async def container(
         if cache_options.cache_enabled:
             embedding_cache: EmbeddingCache = BasicEmbeddingCache(
                 document_database=await stack.enter_async_context(
-                    JSONFileDocumentDatabase(logger, GLOBAL_EMBEDDER_CACHE_FILE),
+                    SQLiteDocumentDatabase(
+                        logger,
+                        GLOBAL_EMBEDDER_CACHE_FILE.with_suffix(".sqlite"),
+                    ),
                 )
             )
         else:

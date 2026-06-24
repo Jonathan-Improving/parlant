@@ -209,6 +209,7 @@ from parlant.core.guidelines import (
     GuidelineStore,
 )
 from parlant.adapters.db.json_file import JSONFileDocumentDatabase
+from parlant.adapters.db.sqlite import SQLiteDocumentDatabase
 from parlant.core.nlp.embedding import (
     BasicEmbeddingCache,
     Embedder,
@@ -910,9 +911,9 @@ async def initialize_container(
         if c[OptimizationPolicy].use_embedding_cache():
             c[EmbeddingCache] = BasicEmbeddingCache(
                 await EXIT_STACK.enter_async_context(
-                    JSONFileDocumentDatabase(
+                    SQLiteDocumentDatabase(
                         c[Logger],
-                        PARLANT_HOME_DIR / "cache_embeddings.json",
+                        PARLANT_HOME_DIR / "embedding_cache.sqlite",
                     )
                 )
             )
