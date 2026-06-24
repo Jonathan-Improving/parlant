@@ -243,8 +243,8 @@ ConsumerId: TypeAlias = Literal["client"]
 SessionMode: TypeAlias = Literal["auto", "manual"]
 """The mode of the session, either 'auto' for automatic handling or 'manual' for manual handling by a human agent."""
 
-LifeSpan: TypeAlias = Literal["response", "session"]
-"""The lifespan of a tool result, either 'response' for just the current response or 'session' for the entire session."""
+LifeSpan: TypeAlias = Literal["response", "session", "auto"]
+"""The lifespan of a tool result, either 'response' for just the current response, 'session' for the entire session, or 'auto' for automatically determined based on token count."""
 
 
 @dataclass(frozen=True)

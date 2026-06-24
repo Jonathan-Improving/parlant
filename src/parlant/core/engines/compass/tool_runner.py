@@ -146,8 +146,8 @@ class ToolRunner:
         if DISABLE_WARNINGS:
             return
 
-        lifespan = result.control.get("lifespan", "session")
-        threshold = 2_000 if lifespan == "response" else 1_000
+        lifespan = result.control.get("lifespan", "auto")
+        threshold = 2_000 if lifespan in ("response", "auto") else 1_000
 
         token_count = await self._estimating_tokenizer.estimate_token_count(
             stringify_tool_result(result.data)

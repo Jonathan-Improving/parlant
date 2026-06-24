@@ -25,7 +25,7 @@ from typing import Any, Optional, cast
 
 from parlant.core.agents import Effort
 from parlant.core.async_utils import safe_gather
-from parlant.core.common import JSONSerializable
+from parlant.core.common import DISABLE_WARNINGS, JSONSerializable
 from parlant.core.emissions import MessageEventHandle, StatusEventHandle
 from parlant.core.engines.alpha.hooks import EngineHooks
 from parlant.core.engines.alpha.optimization_policy import OptimizationPolicy
@@ -57,6 +57,7 @@ from parlant.core.nlp.react import (
     Usage,
     tool_specs_from_tools,
 )
+from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.sessions import (
     EventKind,
     EventSource,
@@ -630,6 +631,7 @@ class _ToolStepController:
         state: _LoopState,
         event: StreamEvent,
         commit_step: Callable[[_LoopState, StreamEvent], Awaitable[None]],
+        tokenizer: EstimatingTokenizer,
     ) -> bool:
         match event:
             case ToolCallStarted():
@@ -670,7 +672,7 @@ class _ToolStepController:
                     data=StatusEventData(status="processing", message="Running tools"),
                 )
 
-                await self.run_tool_calls(context, state, result.tool_calls)
+                await self.run_tool_calls(context, state, result.tool_calls, tokenizer)
 
                 return True
             case _:
@@ -720,6 +722,7 @@ class _ToolStepController:
         context: EngineContext,
         state: _LoopState,
         tool_calls: Sequence[ToolCallPart],
+        tokenizer: EstimatingTokenizer,
     ) -> None:
         # Run all of the step's tool calls concurrently; results keep call order.
         results: tuple[ToolResult | None] = await safe_gather(
@@ -734,10 +737,23 @@ class _ToolStepController:
 
         for tool_call, result in calls_and_results:
             if result is not None:
-                if result.control.get("lifespan", "session") == "session":
+                lifespan = result.control.get("lifespan", "auto")
+
+                if lifespan == "session":
                     persisted_call_ids.append(tool_call.id)
-                else:
+                elif lifespan == "response":
                     transient_call_ids.append(tool_call.id)
+                else:
+                    if await tokenizer.estimate_token_count(json.dumps(result.data)) > 1_000:
+                        if not DISABLE_WARNINGS:
+                            self._logger.warning(
+                                f"Tool result for {tool_call.name} exceeds 1,000 tokens; "
+                                "defaulting to response lifespan."
+                            )
+
+                        transient_call_ids.append(tool_call.id)
+                    else:
+                        persisted_call_ids.append(tool_call.id)
 
                 step_parts.append(
                     ToolResultPart(
@@ -873,6 +889,7 @@ class BaseLoop(Loop):
         meter: Meter,
         optimization_policy: OptimizationPolicy,
         react: ReactGenerator,
+        tokenizer: EstimatingTokenizer,
         tool_runner: ToolRunner,
         reviewer: Reviewer,
         hooks: EngineHooks,
@@ -882,6 +899,7 @@ class BaseLoop(Loop):
         self._meter = meter
         self._optimization_policy = optimization_policy
         self._react = react
+        self._tokenizer = tokenizer
         self._tool_runner = tool_runner
         self._reviewer = reviewer
         self._hooks = hooks
@@ -1180,10 +1198,7 @@ class BaseLoop(Loop):
         event: StreamEvent,
     ) -> bool:
         return await self._tool_step_controller.process(
-            context,
-            state,
-            event,
-            self._commit_react_event,
+            context, state, event, self._commit_react_event, self._tokenizer
         )
 
     async def _review_tool_calls(
@@ -1204,7 +1219,7 @@ class BaseLoop(Loop):
         state: _LoopState,
         tool_calls: Sequence[ToolCallPart],
     ) -> None:
-        await self._tool_step_controller.run_tool_calls(context, state, tool_calls)
+        await self._tool_step_controller.run_tool_calls(context, state, tool_calls, self._tokenizer)
 
     async def _run_tool_call(
         self, context: EngineContext, tool_call: ToolCallPart

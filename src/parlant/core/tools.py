@@ -77,8 +77,8 @@ SessionStatus: TypeAlias = Literal["ready", "processing", "typing"]
 SessionMode: TypeAlias = Literal["auto", "manual"]
 """The mode of the session, indicating whether it is automatically managed by an AI agent or requires manual intervention."""
 
-Lifespan: TypeAlias = Literal["response", "session"]
-"""The lifespan of a tool result, indicating whether it is valid for the duration of a single response or for the entire session."""
+Lifespan: TypeAlias = Literal["response", "session", "auto"]
+"""The lifespan of a tool result, indicating whether it is valid for the duration of a single response, for the entire session, or automatically determined based on token count."""
 
 
 class ToolContext:
