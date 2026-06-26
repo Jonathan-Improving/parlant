@@ -44,3 +44,10 @@ async def test_that_reading_an_unknown_training_job_returns_404(
 ) -> None:
     response = await async_client.get("/train/does-not-exist")
     assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+async def test_that_training_an_unknown_agent_returns_404(
+    async_client: httpx.AsyncClient,
+) -> None:
+    response = await async_client.post("/train", json={"agent_ids": ["nonexistent-agent"]})
+    assert response.status_code == status.HTTP_404_NOT_FOUND

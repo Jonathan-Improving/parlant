@@ -22,11 +22,12 @@ in memory rather than persisted: the SDK drives a progress bar off the same
 """
 
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from parlant.core.agents import AgentStore
+from parlant.core.agents import AgentId, AgentStore
 from parlant.core.background_tasks import BackgroundTaskService
 from parlant.core.common import ItemNotFoundError, UniqueId, generate_id
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
@@ -47,6 +48,7 @@ class TrainingJob:
     id: UniqueId
     status: TrainingStatus
     percentage: float
+    agent_ids: Optional[Sequence[AgentId]] = None
     error: Optional[str] = None
 
 
@@ -66,12 +68,21 @@ class TrainingService:
         self._logger = logger
         self._jobs: dict[UniqueId, TrainingJob] = {}
 
-    async def create_training_task(self) -> UniqueId:
+    async def create_training_task(
+        self,
+        agent_ids: Optional[Sequence[AgentId]] = None,
+    ) -> UniqueId:
+        # Validate up front so a typo'd agent id fails the request rather than
+        # silently training nothing.
+        for agent_id in agent_ids or []:
+            await self._agent_store.read_agent(agent_id)
+
         job_id = generate_id()
         self._jobs[job_id] = TrainingJob(
             id=job_id,
             status=TrainingStatus.PENDING,
             percentage=0.0,
+            agent_ids=list(agent_ids) if agent_ids else None,
         )
         await self._background_task_service.start(self._run(job_id), tag=f"train({job_id})")
         return job_id
@@ -81,15 +92,32 @@ class TrainingService:
             raise ItemNotFoundError(job_id, "Training job not found")
         return self._jobs[job_id]
 
-    async def train(self, progress_report: Optional[ProgressReport] = None) -> None:
-        """Train one discriminant frame per agent, over that agent's own guideline
-        space. Each agent's policies only compete within that agent, so frames are
-        never shared. The SDK calls this directly on startup (driving its own progress
-        bar); the API path goes through a job. A shared ``progress_report`` accumulates
-        across agents."""
-        for agent in await self._agent_store.list_agents():
-            guidelines = await self._entity_queries.find_guidelines_for_context(agent.id, [])
-            await self._recaller.retrain(agent.id, guidelines, progress_report)
+    async def train(
+        self,
+        agent_ids: Optional[Sequence[AgentId]] = None,
+        progress_report: Optional[ProgressReport] = None,
+    ) -> None:
+        """Train per-agent discriminant frames. With no ``agent_ids`` (or an empty
+        list), train every agent; otherwise train only the named ones. Each agent's
+        policies only compete within that agent, so frames are never shared. The SDK
+        calls this directly on startup; the API path goes through a job. A shared
+        ``progress_report`` accumulates across agents."""
+        if agent_ids:
+            target_ids = list(agent_ids)
+        else:
+            target_ids = [agent.id for agent in await self._agent_store.list_agents()]
+
+        for agent_id in target_ids:
+            await self.train_agent(agent_id, progress_report)
+
+    async def train_agent(
+        self,
+        agent_id: AgentId,
+        progress_report: Optional[ProgressReport] = None,
+    ) -> None:
+        """Train a single agent's discriminant frame over its own guideline space."""
+        guidelines = await self._entity_queries.find_guidelines_for_context(agent_id, [])
+        await self._recaller.retrain(agent_id, guidelines, progress_report)
 
     async def _run(self, job_id: UniqueId) -> None:
         job = self._jobs[job_id]
@@ -99,7 +127,7 @@ class TrainingService:
             job.percentage = percentage
 
         try:
-            await self.train(ProgressReport(on_progress))
+            await self.train(job.agent_ids, ProgressReport(on_progress))
             job.status = TrainingStatus.COMPLETED
             job.percentage = 100.0
         except Exception as exc:

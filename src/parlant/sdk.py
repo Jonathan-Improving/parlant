@@ -4849,7 +4849,7 @@ class Server:
             async def callback(pct: float) -> None:
                 training_progress.update(bar, completed=pct)
 
-            await training_service.train(ProgressReport(callback))
+            await training_service.train(progress_report=ProgressReport(callback))
             training_progress.update(bar, completed=100)
 
     async def _apply_evaluation_results(

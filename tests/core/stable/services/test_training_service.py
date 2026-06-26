@@ -55,6 +55,12 @@ class _FakeAgentStore:
     async def list_agents(self, *args: object, **kwargs: object) -> Sequence[Agent]:
         return self._agents
 
+    async def read_agent(self, agent_id: AgentId) -> Agent:
+        for agent in self._agents:
+            if agent.id == agent_id:
+                return agent
+        raise ItemNotFoundError(UniqueId(agent_id))
+
 
 class _FakeEntityQueries:
     def __init__(self, guidelines_by_agent: dict[AgentId, Sequence[Guideline]]) -> None:
@@ -120,6 +126,71 @@ async def test_that_a_training_task_trains_every_agent_in_its_own_space(
     # Each agent was trained on its OWN guideline space.
     assert {g.id for g in recaller.trained_by_agent[agent_a.id]} == {g.id for g in guidelines_a}
     assert {g.id for g in recaller.trained_by_agent[agent_b.id]} == {g.id for g in guidelines_b}
+
+
+async def test_that_a_scoped_training_task_trains_only_the_named_agents(
+    container: Container,
+) -> None:
+    from tests.core.stable.engines.compass.guideline_matching.utils import (
+        create_agent,
+        create_guideline,
+    )
+
+    agent_a = create_agent()
+    agent_b = create_agent()
+    guidelines_a = [create_guideline(condition="a refund is wanted", action="refund", tags=[])]
+    guidelines_b = [create_guideline(condition="hours are asked", action="give hours", tags=[])]
+
+    recaller = _FakeRecaller()
+    service = _training_service(
+        container,
+        recaller,
+        agents=[agent_a, agent_b],
+        guidelines_by_agent={agent_a.id: guidelines_a, agent_b.id: guidelines_b},
+    )
+
+    job_id = await service.create_training_task(agent_ids=[agent_a.id])
+    await _wait_until_settled(service, job_id)
+
+    assert (await service.read_training_job(job_id)).status == TrainingStatus.COMPLETED
+    assert agent_a.id in recaller.trained_by_agent
+    assert agent_b.id not in recaller.trained_by_agent
+
+
+async def test_that_train_agent_trains_a_single_agent(container: Container) -> None:
+    from tests.core.stable.engines.compass.guideline_matching.utils import (
+        create_agent,
+        create_guideline,
+    )
+
+    agent = create_agent()
+    guidelines = [create_guideline(condition="a refund is wanted", action="refund", tags=[])]
+    recaller = _FakeRecaller()
+    service = _training_service(
+        container, recaller, agents=[agent], guidelines_by_agent={agent.id: guidelines}
+    )
+
+    await service.train_agent(agent.id)
+
+    assert {g.id for g in recaller.trained_by_agent[agent.id]} == {g.id for g in guidelines}
+
+
+async def test_that_creating_a_training_task_for_an_unknown_agent_is_rejected(
+    container: Container,
+) -> None:
+    from tests.core.stable.engines.compass.guideline_matching.utils import create_agent
+
+    agent = create_agent()
+    recaller = _FakeRecaller()
+    service = _training_service(
+        container, recaller, agents=[agent], guidelines_by_agent={agent.id: []}
+    )
+
+    with raises(ItemNotFoundError):
+        await service.create_training_task(agent_ids=[AgentId("nonexistent")])
+
+    # Validation happens up front — no training was kicked off.
+    assert recaller.trained_by_agent == {}
 
 
 async def test_that_a_failed_training_task_is_marked_failed(container: Container) -> None:

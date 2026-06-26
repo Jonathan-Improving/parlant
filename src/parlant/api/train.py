@@ -20,6 +20,7 @@ from pydantic import Field
 
 from parlant.api.common import apigen_config
 from parlant.api.authorization import AuthorizationPolicy, Operation
+from parlant.core.agents import AgentId
 from parlant.core.common import DefaultBaseModel, ItemNotFoundError, UniqueId
 from parlant.core.services.training_service import TrainingJob, TrainingService, TrainingStatus
 
@@ -31,6 +32,13 @@ class TrainingStatusDTO(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class TrainingCreationParamsDTO(DefaultBaseModel):
+    agent_ids: list[str] = Field(
+        default_factory=list,
+        description="Agents to train; empty (or omitted) trains every agent",
+    )
 
 
 class TrainingJobDTO(DefaultBaseModel):
@@ -68,15 +76,28 @@ def create_router(
         response_model=TrainingJobDTO,
         **apigen_config(group_name=API_GROUP, method_name="create"),
     )
-    async def create_training(request: Request) -> TrainingJobDTO:
-        """Starts a background training run over the full guideline inventory.
+    async def create_training(
+        request: Request,
+        params: Optional[TrainingCreationParamsDTO] = None,
+    ) -> TrainingJobDTO:
+        """Starts a background training run.
 
+        Trains every agent by default, or only the agents named in ``agent_ids``.
         Returns immediately with the new job, whose progress can be polled via
         ``GET /train/{job_id}``.
         """
         await authorization_policy.authorize(request=request, operation=Operation.CREATE_TRAINING)
 
-        job_id = await training_service.create_training_task()
+        agent_ids = [AgentId(agent_id) for agent_id in (params.agent_ids if params else [])]
+
+        try:
+            job_id = await training_service.create_training_task(agent_ids=agent_ids or None)
+        except ItemNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            )
+
         return _job_to_dto(await training_service.read_training_job(job_id))
 
     @router.get(
