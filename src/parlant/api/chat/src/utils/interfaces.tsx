@@ -47,6 +47,7 @@ export interface SessionInterface {
 	customer_id: string;
 	agent_id: string;
 	creation_utc: string;
+	modified_utc?: string;
 }
 
 export interface SessionCsvInterface {
