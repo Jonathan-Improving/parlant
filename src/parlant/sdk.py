@@ -168,8 +168,10 @@ from parlant.core.relationships import (
     RelationshipId,
     RelationshipStore,
 )
+from parlant.core.services.indexing.common import ProgressReport
 from parlant.core.services.indexing.indexer import Indexer
 from parlant.core.services.indexing.evaluation_service import EvaluationService
+from parlant.core.services.training_service import TrainingService
 from parlant.core.services.tools.service_registry import ServiceDocumentRegistry, ServiceRegistry
 from parlant.core.sessions import (
     Event,
@@ -4260,6 +4262,14 @@ class Server:
         ):
             await self._process_indexing()
 
+        # Train each agent's recall discriminants now that evaluations have populated
+        # the guidelines' signals.
+        with self._container[Tracer].span(
+            "startup.training",
+            attributes={"scope": "Training"},
+        ):
+            await self._process_training()
+
         await self._setup_retrievers()
 
         # Start health check polling to set ready event when the server is ready to receive requests
@@ -4816,6 +4826,31 @@ class Server:
 
             await indexer.run(progress_callback=callback)
             indexing_progress.update(bar, completed=100)
+
+        print()
+
+    async def _process_training(self) -> None:
+        training_service = self._container[TrainingService]
+
+        if self.log_level == LogLevel.TRACE:
+            await training_service.train()
+            return
+
+        training_progress = Progress(
+            "[progress.description]{task.description}",
+            BarColumn(),
+            TaskProgressColumn(style="bold blue"),
+            TimeElapsedColumn(),
+        )
+
+        with training_progress:
+            bar = training_progress.add_task("Training recall classifiers", total=100)
+
+            async def callback(pct: float) -> None:
+                training_progress.update(bar, completed=pct)
+
+            await training_service.train(ProgressReport(callback))
+            training_progress.update(bar, completed=100)
 
         print()
 
