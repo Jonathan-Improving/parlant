@@ -12,19 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+import numpy as np
 from lagom import Container
 from pytest import fixture
 
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
+    GuidelineRecaller,
+    _LogisticModel,
+)
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.engines.engine_context import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent
 from parlant.core.nlp.embedding import Embedder, EmbeddingCache, EmbeddingResult, NullEmbeddingCache
 from parlant.core.nlp.tokenization import EstimatingTokenizer
+from parlant.core.services.indexing.common import ProgressReport
 from parlant.core.sessions import EventSource
 
 from tests.core.stable.engines.compass.guideline_matching.utils import (
@@ -41,6 +47,36 @@ def recaller(container: Container) -> GuidelineRecaller:
 
 def test_that_a_guideline_recaller_can_be_created(recaller: GuidelineRecaller) -> None:
     assert recaller is not None
+
+
+def test_that_the_logistic_model_separates_a_linearly_separable_set() -> None:
+    rng = np.random.default_rng(0)
+    positives = rng.normal(loc=[2.0, 2.0], scale=0.3, size=(30, 2))
+    negatives = rng.normal(loc=[-2.0, -2.0], scale=0.3, size=(30, 2))
+    features = np.vstack([positives, negatives])
+    labels = np.array([1] * 30 + [0] * 30)
+
+    model = _LogisticModel.fit(features, labels, C=0.5)
+
+    # Held-out points on each side fall on the correct side of the boundary.
+    assert model.decision(np.array([[2.0, 2.0]]))[0] > 0.0
+    assert model.decision(np.array([[-2.0, -2.0]]))[0] < 0.0
+    # The set is separable, so every positive outscores every negative.
+    assert model.decision(positives).min() > model.decision(negatives).max()
+
+
+def test_that_the_logistic_model_balances_class_weights() -> None:
+    # One lone positive against many negatives: balanced weighting must keep it
+    # from being drowned out (an unweighted fit would put it below the boundary).
+    rng = np.random.default_rng(1)
+    positives = np.array([[3.0, 0.0]])
+    negatives = rng.normal(loc=[-1.0, 0.0], scale=0.5, size=(100, 2))
+    features = np.vstack([positives, negatives])
+    labels = np.array([1] + [0] * 100)
+
+    model = _LogisticModel.fit(features, labels, C=0.5, class_weight="balanced")
+
+    assert model.decision(positives)[0] > 0.0
 
 
 class _FakeTokenizer(EstimatingTokenizer):
@@ -87,35 +123,6 @@ class _FakeEmbedder(Embedder):
         return [0.0, -1.0]
 
 
-class _TopicShiftEmbedder(_FakeEmbedder):
-    def _vector_for_text(self, text: str) -> list[float]:
-        lowered = text.lower()
-
-        if "old package issue" in lowered and "money back" in lowered:
-            return [0.0, 1.0]
-
-        return super()._vector_for_text(text)
-
-
-class _CentralityBoostEmbedder(_FakeEmbedder):
-    def _vector_for_text(self, text: str) -> list[float]:
-        lowered = text.lower()
-
-        if "central policy" in lowered:
-            return [0.1, -0.005]
-
-        if "east policy" in lowered:
-            return [1.0, 0.0]
-
-        if "west policy" in lowered:
-            return [-1.0, 0.01]
-
-        if "north request" in lowered:
-            return [0.0, 1.0]
-
-        return super()._vector_for_text(text)
-
-
 class _FakeNLPService:
     def __init__(self, embedder: _FakeEmbedder) -> None:
         self._embedder = embedder
@@ -146,13 +153,13 @@ class _FakeEmbeddingCache:
 def _radar_recaller(
     embedder: _FakeEmbedder | None = None,
     embedding_cache: _FakeEmbeddingCache | None = None,
-    centrality_boost_beta: float = GuidelineRecaller.DEFAULT_CENTRALITY_BOOST_BETA,
+    **kwargs: Any,
 ) -> GuidelineRecaller:
     return GuidelineRecaller(
         nlp_service=_FakeNLPService(embedder or _FakeEmbedder()),  # type: ignore[arg-type]
         tracer=create_engine_context(conversation=[]).tracer,
         embedding_cache=embedding_cache or _FakeEmbeddingCache(),  # type: ignore[arg-type]
-        centrality_boost_beta=centrality_boost_beta,
+        **kwargs,
     )
 
 
@@ -182,7 +189,7 @@ def _create_sample_guidelines() -> dict[str, Guideline]:
     return {"refund": refund, "hours": hours, "shipping": shipping}
 
 
-async def test_that_the_recaller_uses_centroid_relative_relevance() -> None:
+async def test_that_the_recaller_recalls_the_discriminating_policy() -> None:
     recaller = _radar_recaller()
     guidelines = _create_sample_guidelines()
     available = list(guidelines.values())
@@ -191,74 +198,33 @@ async def test_that_the_recaller_uses_centroid_relative_relevance() -> None:
     result = await recaller.recall(context, available)
 
     relevance_by_id = {r.guideline.id: r.is_relevant for r in result.recalled_guidelines}
-    scores_by_id = {r.guideline.id: r.score for r in result.recalled_guidelines}
 
     assert result.duration >= 0.0
     assert len(result.recalled_guidelines) == 3
     assert relevance_by_id[guidelines["refund"].id]
     assert not relevance_by_id[guidelines["hours"].id]
     assert not relevance_by_id[guidelines["shipping"].id]
-    assert scores_by_id[guidelines["refund"].id] > 0.0
 
 
-async def test_that_the_recaller_unions_cumulative_and_latest_user_message_relevance() -> None:
-    recaller = _radar_recaller(_TopicShiftEmbedder())
+async def test_that_the_recaller_stays_sticky_across_user_turns() -> None:
+    # The refund-relevant turn is earlier in the conversation; max-over-turns must
+    # keep the refund policy relevant even though the latest turn is off-topic.
+    recaller = _radar_recaller()
     guidelines = _create_sample_guidelines()
     available = list(guidelines.values())
     context = _context(
         [
-            (EventSource.CUSTOMER, "I have an old package issue"),
-            (EventSource.AI_AGENT, "I can check that for you."),
-            (EventSource.CUSTOMER, "Actually, I want my money back"),
+            (EventSource.CUSTOMER, "I want my money back"),
+            (EventSource.AI_AGENT, "Let me help."),
+            (EventSource.CUSTOMER, "what are your opening hours?"),
         ]
     )
 
     result = await recaller.recall(context, available)
 
-    scores_by_id = {r.guideline.id: r.score for r in result.recalled_guidelines}
     relevance_by_id = {r.guideline.id: r.is_relevant for r in result.recalled_guidelines}
 
     assert relevance_by_id[guidelines["refund"].id]
-    assert scores_by_id[guidelines["refund"].id] > 0.0
-
-
-async def test_that_the_recaller_boosts_near_centroid_policy_entities() -> None:
-    central = create_guideline(
-        condition="central policy applies",
-        action="follow the central policy",
-        tags=[],
-    )
-    east = create_guideline(
-        condition="east policy applies",
-        action="follow the east policy",
-        tags=[],
-    )
-    west = create_guideline(
-        condition="west policy applies",
-        action="follow the west policy",
-        tags=[],
-    )
-    context = _context([(EventSource.CUSTOMER, "north request")])
-
-    unboosted_result = await _radar_recaller(
-        _CentralityBoostEmbedder(),
-        centrality_boost_beta=0.0,
-    ).recall(context, [central, east, west])
-    boosted_result = await _radar_recaller(_CentralityBoostEmbedder()).recall(
-        context,
-        [central, east, west],
-    )
-
-    unboosted_central = next(
-        r for r in unboosted_result.recalled_guidelines if r.guideline.id == central.id
-    )
-    boosted_central = next(
-        r for r in boosted_result.recalled_guidelines if r.guideline.id == central.id
-    )
-
-    assert not unboosted_central.is_relevant
-    assert boosted_central.is_relevant
-    assert boosted_central.score > unboosted_central.score
 
 
 async def test_that_the_recaller_embeds_policy_signals() -> None:
@@ -303,8 +269,7 @@ def test_that_the_recaller_formats_description_only_policy_guideline() -> None:
     )
 
     assert recaller._guideline_embedding_content(guideline) == (
-        "# Refund Policy\n\n"
-        "Refunds are allowed within 30 days."
+        "# Refund Policy\n\nRefunds are allowed within 30 days."
     )
 
 
@@ -379,3 +344,91 @@ async def test_that_the_recaller_includes_a_single_candidate_guideline() -> None
 
     assert result.recalled_guidelines[0].guideline.id == guideline.id
     assert result.recalled_guidelines[0].is_relevant
+
+
+async def test_that_retrain_reports_progress_and_warms_recall() -> None:
+    recaller = _radar_recaller()
+    guidelines = list(_create_sample_guidelines().values())
+
+    seen: list[float] = []
+
+    async def on_progress(percentage: float) -> None:
+        seen.append(percentage)
+
+    report = ProgressReport(on_progress)
+    await recaller.retrain(guidelines, report)
+
+    assert report.percentage == 100.0
+    assert seen and seen[-1] == 100.0
+
+    # Recall now serves off the trained current frame.
+    context = _context([(EventSource.CUSTOMER, "I'd like my money back")])
+    result = await recaller.recall(context, guidelines)
+    relevance_by_id = {r.guideline.id: r.is_relevant for r in result.recalled_guidelines}
+    assert relevance_by_id[guidelines[0].id] or any(relevance_by_id.values())
+
+
+async def test_that_retrain_calibrates_thresholds_from_negatives() -> None:
+    recaller = _radar_recaller()
+    guidelines = list(_create_sample_guidelines().values())
+
+    await recaller.retrain(guidelines)
+
+    assert recaller._current_frame is not None
+    for guideline in guidelines:
+        policy = recaller._current_frame.by_guideline[guideline.id]
+        # Every policy has negatives (the other policies), so its threshold is a real
+        # negative-calibrated percentile — not the degenerate "never fire" infinity.
+        assert math.isfinite(policy.threshold)
+
+
+async def test_that_a_pinned_signal_forces_recall() -> None:
+    hours = create_guideline(
+        condition="the customer asks about opening hours",
+        action="tell them the store hours",
+        tags=[],
+    )
+    refund = create_guideline(
+        condition="the customer wants a refund",
+        action="start the refund flow",
+        tags=[],
+    )
+    shipping = create_guideline(
+        condition="the customer asks where their package is",
+        action="share the shipping status",
+        tags=[],
+    )
+    context = _context([(EventSource.CUSTOMER, "I want my money back")])
+
+    plain = await _radar_recaller().recall(context, [hours, refund, shipping])
+    plain_hours = next(r for r in plain.recalled_guidelines if r.guideline.id == hours.id)
+    assert not plain_hours.is_relevant
+
+    pinned_hours = replace(hours, signals=["[__pin__]I want my money back"])
+    pinned = await _radar_recaller(pin_match_epsilon=0.5).recall(
+        context, [pinned_hours, refund, shipping]
+    )
+    pinned_result = next(r for r in pinned.recalled_guidelines if r.guideline.id == hours.id)
+    assert pinned_result.is_relevant
+
+
+async def test_that_pin_prefixed_signals_become_must_fire_exemplars() -> None:
+    recaller = _radar_recaller(pin_match_epsilon=0.5)
+    hours = replace(
+        create_guideline(
+            condition="the customer asks about opening hours",
+            action="tell them the store hours",
+            tags=[],
+        ),
+        signals=["[__pin__]I want my money back"],
+    )
+    refund = create_guideline(
+        condition="the customer wants a refund",
+        action="start the refund flow",
+        tags=[],
+    )
+
+    await recaller.retrain([hours, refund])
+
+    assert recaller._current_frame is not None
+    assert len(recaller._current_frame.by_guideline[hours.id].pin_exemplars) == 1

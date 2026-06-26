@@ -13,13 +13,16 @@
 # limitations under the License.
 
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from math import exp, sqrt
-from statistics import median
+from typing import Literal, Optional
 import time
 
+import numpy as np
+import numpy.typing as npt
+
 from parlant.core.async_utils import safe_gather
+from parlant.core.services.indexing.common import ProgressReport
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.common import xxh3_checksum
 from parlant.core.guidelines import Guideline, GuidelineId
@@ -30,6 +33,63 @@ from parlant.core.tracer import Tracer
 
 
 _EPSILON = 1e-12
+
+
+@dataclass(frozen=True, eq=False)
+class _LogisticModel:
+    """A minimal L2-regularized logistic regression, fit by batch gradient descent.
+
+    Kept dependency-light (numpy only) — the recaller trains one of these per policy
+    to discriminate that policy's signals from every other policy's. The objective
+    mirrors scikit-learn's parameterization: ``C * mean(weighted log-loss) + 0.5||w||^2``,
+    so ``C`` is the inverse regularization strength. ``decision`` returns the raw
+    ``w·x + b`` (the classifier's ``decision_function``), which is what the recaller
+    thresholds and pools over.
+    """
+
+    weights: npt.NDArray[np.float64]
+    bias: float
+
+    @staticmethod
+    def fit(
+        features: npt.NDArray[np.float64],
+        labels: npt.NDArray[np.float64],
+        *,
+        C: float = 0.5,
+        class_weight: Optional[Literal["balanced"]] = None,
+        iterations: int = 1000,
+        learning_rate: float = 1.0,
+    ) -> "_LogisticModel":
+        x = np.asarray(features, dtype=np.float64)
+        y = np.asarray(labels, dtype=np.float64).reshape(-1)
+        n, d = x.shape
+
+        if class_weight == "balanced":
+            positives = max(1.0, float(y.sum()))
+            negatives = max(1.0, float(n) - positives)
+            sample_weight = np.where(y == 1.0, n / (2.0 * positives), n / (2.0 * negatives))
+        else:
+            sample_weight = np.ones(n, dtype=np.float64)
+
+        weight_mass = float(sample_weight.sum()) or 1.0
+        w = np.zeros(d, dtype=np.float64)
+        b = 0.0
+
+        for _ in range(iterations):
+            z = x @ w + b
+            predictions = 1.0 / (1.0 + np.exp(-z))
+            weighted_error = sample_weight * (predictions - y)
+            # Mean weighted data-loss gradient (so step size is scale-stable in n),
+            # plus the L2 term on the weights only.
+            grad_w = C * (x.T @ weighted_error) / weight_mass + w
+            grad_b = C * float(weighted_error.sum()) / weight_mass
+            w -= learning_rate * grad_w
+            b -= learning_rate * grad_b
+
+        return _LogisticModel(weights=w, bias=b)
+
+    def decision(self, features: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return np.asarray(features, dtype=np.float64) @ self.weights + self.bias
 
 
 @dataclass(frozen=True)
@@ -45,44 +105,61 @@ class GuidelineRecallResult:
     duration: float
 
 
-@dataclass(frozen=True)
-class _PolicyEntity:
-    direction: tuple[float, ...] | None
-    boost: float
+@dataclass(frozen=True, eq=False)
+class _TrainedPolicy:
+    """A policy's trained relevance discriminant plus its decision boundary.
+
+    ``model`` separates this policy's own (content + signal) directions from every
+    other policy's. ``threshold`` is the negative-calibrated operating point — the
+    q-th percentile of the *other* policies' decision scores. ``pin_exemplars`` are
+    raw unit vectors of ``[__pin__]``-prefixed signals: must-fire overrides that
+    force relevance when the live conversation is within ``pin_match_epsilon``.
+    """
+
+    model: _LogisticModel
+    threshold: float
+    pin_exemplars: tuple[npt.NDArray[np.float64], ...]
 
 
-@dataclass(frozen=True)
-class _PolicyFrame:
-    centroid: tuple[float, ...]
-    entities: dict[GuidelineId, tuple[_PolicyEntity, ...]]
+@dataclass(frozen=True, eq=False)
+class _TrainedFrame:
+    centroid: npt.NDArray[np.float64]
+    by_guideline: Mapping[GuidelineId, _TrainedPolicy]
 
 
 class GuidelineRecaller:
-    DEFAULT_RECALL_MARGIN = 0.03
-    DEFAULT_CENTRALITY_BOOST_BETA = 0.15
-    DEFAULT_CENTRALITY_BOOST_TAU = 0.5
-    DEFAULT_CENTRALITY_BOOST_SHARPNESS = 0.15
-    _MAX_POLICY_FRAME_CACHE_SIZE = 32
+    DEFAULT_RECALL_THRESHOLD_PERCENTILE = 70.0
+    DEFAULT_LOGISTIC_C = 0.5
+    DEFAULT_PIN_MATCH_EPSILON = 0.9
+    DEFAULT_MAX_NEGATIVES = 2000
+    PIN_PREFIX = "[__pin__]"
+    _MAX_FRAME_CACHE_SIZE = 8
 
     def __init__(
         self,
         nlp_service: NLPService,
         tracer: Tracer,
         embedding_cache: EmbeddingCache,
-        recall_margin: float = DEFAULT_RECALL_MARGIN,
-        centrality_boost_beta: float = DEFAULT_CENTRALITY_BOOST_BETA,
-        centrality_boost_tau: float = DEFAULT_CENTRALITY_BOOST_TAU,
-        centrality_boost_sharpness: float = DEFAULT_CENTRALITY_BOOST_SHARPNESS,
+        recall_threshold_percentile: float = DEFAULT_RECALL_THRESHOLD_PERCENTILE,
+        logistic_C: float = DEFAULT_LOGISTIC_C,
+        pin_match_epsilon: float = DEFAULT_PIN_MATCH_EPSILON,
+        max_negatives: int = DEFAULT_MAX_NEGATIVES,
     ) -> None:
         self._nlp_service = nlp_service
         self._tracer = tracer
         self._embedding_cache = embedding_cache
-        self._recall_margin = recall_margin
-        self._centrality_boost_beta = centrality_boost_beta
-        self._centrality_boost_tau = centrality_boost_tau
-        self._centrality_boost_sharpness = centrality_boost_sharpness
-        self._policy_frame_cache: OrderedDict[
-            tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _PolicyFrame
+        self._recall_threshold_percentile = recall_threshold_percentile
+        self._logistic_C = logistic_C
+        self._pin_match_epsilon = pin_match_epsilon
+        self._max_negatives = max_negatives
+        # The frame from the last explicit retrain() — trained over the full
+        # inventory, so its discriminants have the best possible negatives. Recall
+        # uses it whenever it covers the requested batch.
+        self._current_frame: _TrainedFrame | None = None
+        # Backstop LRU for batches the current frame doesn't cover (e.g. before the
+        # first retrain, or for a guideline added since): lazily train on the batch.
+        self._frame_cache: OrderedDict[
+            tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _TrainedFrame
         ] = OrderedDict()
 
     async def recall(
@@ -97,6 +174,29 @@ class GuidelineRecaller:
                 recalled_guidelines=recalled_guidelines,
                 duration=time.time() - started_at,
             )
+
+    async def retrain(
+        self,
+        guidelines: Sequence[Guideline],
+        progress_report: Optional[ProgressReport] = None,
+    ) -> None:
+        """Train each guideline's relevance discriminant against the whole inventory.
+
+        Offline, idempotent, and reported per guideline via ``progress_report`` (for
+        the SDK progress bar / the POST /train job monitor). Stores the result as the
+        current frame, which recall then uses directly — inference stays a dot product.
+        """
+        with self._tracer.span("guideline.recall.retrain"):
+            if not guidelines:
+                self._current_frame = _TrainedFrame(
+                    centroid=np.zeros(0, dtype=np.float64), by_guideline={}
+                )
+                return
+
+            embedder = await self._nlp_service.get_embedder()
+            frame = await self._train_frame(embedder, guidelines, progress_report)
+            self._current_frame = frame
+            self._cache_frame(self._frame_key(embedder, guidelines), frame)
 
     async def _do_recall(
         self,
@@ -122,112 +222,193 @@ class GuidelineRecaller:
 
         embedder = await self._nlp_service.get_embedder()
         frame, query_vectors = await safe_gather(
-            self._get_policy_frame(embedder, guidelines),
+            self._frame_for(embedder, guidelines),
             self._embed_many(embedder, queries),
         )
-        query_directions = [
-            direction
-            for vector in query_vectors
-            if (direction := self._normalize(self._subtract(vector, frame.centroid))) is not None
-        ]
 
-        if not query_directions:
+        queries_array = np.asarray(query_vectors, dtype=np.float64)
+        directions, direction_valid = self._row_units(queries_array - frame.centroid)
+        raw_units, raw_valid = self._row_units(queries_array)
+        directions = directions[direction_valid]
+        pin_query_units = raw_units[raw_valid]
+
+        if directions.shape[0] == 0:
             return []
 
-        return [
-            RecalledGuideline(
-                guideline=guideline,
-                is_relevant=score > -self._recall_margin,
-                score=score,
-            )
-            for guideline in guidelines
-            if (policy_entities := frame.entities.get(guideline.id))
-            for score in [
-                max(
-                    (
-                        self._dot(query_direction, policy_entity.direction)
-                        if policy_entity.direction
-                        else 0.0
-                    )
-                    + policy_entity.boost
-                    for query_direction in query_directions
-                    for policy_entity in policy_entities
-                )
-            ]
-        ]
+        recalled: list[RecalledGuideline] = []
+        for guideline in guidelines:
+            policy = frame.by_guideline.get(guideline.id)
+            if policy is None:
+                # Not covered by the current frame (stale inventory; awaiting a
+                # /train). Skip rather than guess.
+                continue
 
-    async def _get_policy_frame(
+            scores = policy.model.decision(directions)
+            score = float(scores.max())
+            pinned = self._matches_pin(pin_query_units, policy.pin_exemplars)
+            recalled.append(
+                RecalledGuideline(
+                    guideline=guideline,
+                    is_relevant=bool(score > policy.threshold) or pinned,
+                    score=score,
+                )
+            )
+
+        return recalled
+
+    async def _frame_for(
         self,
         embedder: Embedder,
         guidelines: Sequence[Guideline],
-    ) -> _PolicyFrame:
-        ordered_policy_specs = sorted(
-            ((g, self._list_guideline_contents(g)) for g in guidelines),
-            key=lambda spec: str(spec[0].id),
+    ) -> _TrainedFrame:
+        requested_ids = {g.id for g in guidelines}
+
+        if self._current_frame is not None and requested_ids <= set(
+            self._current_frame.by_guideline
+        ):
+            return self._current_frame
+
+        key = self._frame_key(embedder, guidelines)
+        if frame := self._frame_cache.get(key):
+            self._frame_cache.move_to_end(key)
+            return frame
+
+        frame = await self._train_frame(embedder, guidelines, None)
+        self._cache_frame(key, frame)
+        return frame
+
+    async def _train_frame(
+        self,
+        embedder: Embedder,
+        guidelines: Sequence[Guideline],
+        progress_report: Optional[ProgressReport],
+    ) -> _TrainedFrame:
+        ordered = sorted(guidelines, key=lambda g: str(g.id))
+
+        texts: list[str] = []
+        owner: list[int] = []
+        is_pin: list[bool] = []
+        for index, guideline in enumerate(ordered):
+            for text, pinned in self._training_items(guideline):
+                texts.append(text)
+                owner.append(index)
+                is_pin.append(pinned)
+
+        vectors = np.asarray(await self._embed_many(embedder, texts), dtype=np.float64)
+        centroid = vectors.mean(axis=0)
+
+        centered_units, centered_valid = self._row_units(vectors - centroid)
+        raw_units, raw_valid = self._row_units(vectors)
+        owner_array = np.asarray(owner)
+        pin_array = np.asarray(is_pin)
+
+        if progress_report:
+            await progress_report.stretch(len(ordered))
+
+        by_guideline: dict[GuidelineId, _TrainedPolicy] = {}
+        for index, guideline in enumerate(ordered):
+            is_own = owner_array == index
+            positives = centered_units[is_own & centered_valid]
+            negatives = self._sample(centered_units[(~is_own) & centered_valid])
+
+            policy = self._train_policy(positives, negatives)
+            pin_exemplars = tuple(raw_units[i] for i in np.where(is_own & pin_array & raw_valid)[0])
+
+            by_guideline[guideline.id] = _TrainedPolicy(
+                model=policy[0],
+                threshold=policy[1],
+                pin_exemplars=pin_exemplars,
+            )
+
+            if progress_report:
+                await progress_report.increment(1)
+
+        return _TrainedFrame(centroid=centroid, by_guideline=by_guideline)
+
+    def _train_policy(
+        self,
+        positives: npt.NDArray[np.float64],
+        negatives: npt.NDArray[np.float64],
+    ) -> tuple[_LogisticModel, float]:
+        if positives.shape[0] == 0 or negatives.shape[0] == 0:
+            # Degenerate (e.g. content collapses onto the centroid); never fire.
+            dimensions = positives.shape[1] if positives.ndim == 2 and positives.shape[1] else 1
+            return _LogisticModel(weights=np.zeros(dimensions), bias=0.0), float("inf")
+
+        features = np.vstack([positives, negatives])
+        labels = np.concatenate([np.ones(len(positives)), np.zeros(len(negatives))])
+        model = _LogisticModel.fit(features, labels, C=self._logistic_C, class_weight="balanced")
+        threshold = float(
+            np.percentile(model.decision(negatives), self._recall_threshold_percentile)
         )
-        ordered_guidelines = [guideline for guideline, _ in ordered_policy_specs]
-        ordered_policy_contents = [contents for _, contents in ordered_policy_specs]
-        key = (
+        return model, threshold
+
+    def _sample(self, rows: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        if rows.shape[0] <= self._max_negatives:
+            return rows
+        # Deterministic, evenly-spaced subset — keeps retrain reproducible/cacheable.
+        indices = np.unique(
+            np.linspace(0, rows.shape[0] - 1, self._max_negatives).round().astype(int)
+        )
+        return np.asarray(rows[indices], dtype=np.float64)
+
+    def _matches_pin(
+        self,
+        query_units: npt.NDArray[np.float64],
+        pin_exemplars: tuple[npt.NDArray[np.float64], ...],
+    ) -> bool:
+        if not pin_exemplars or query_units.shape[0] == 0:
+            return False
+        for exemplar in pin_exemplars:
+            # query_units and exemplar are unit vectors, so the dot is cosine.
+            if float((query_units @ exemplar).max()) > self._pin_match_epsilon:
+                return True
+        return False
+
+    def _training_items(self, guideline: Guideline) -> list[tuple[str, bool]]:
+        items: list[tuple[str, bool]] = [(self._guideline_embedding_content(guideline), False)]
+        for signal in guideline.signals:
+            if signal.startswith(self.PIN_PREFIX):
+                items.append((signal[len(self.PIN_PREFIX) :].strip(), True))
+            else:
+                items.append((signal, False))
+        return items
+
+    def _row_units(
+        self,
+        rows: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+        norms = np.linalg.norm(rows, axis=1, keepdims=True)
+        valid = norms.reshape(-1) > _EPSILON
+        safe = np.where(norms > _EPSILON, norms, 1.0)
+        return rows / safe, valid
+
+    def _frame_key(
+        self,
+        embedder: Embedder,
+        guidelines: Sequence[Guideline],
+    ) -> tuple[str, tuple[tuple[str, tuple[str, ...]], ...]]:
+        ordered = sorted(guidelines, key=lambda g: str(g.id))
+        return (
             embedder.id,
             tuple(
-                (str(g.id), tuple(xxh3_checksum(content) for content in contents))
-                for g, contents in zip(ordered_guidelines, ordered_policy_contents)
+                (
+                    str(g.id),
+                    tuple(xxh3_checksum(content) for content in self._list_guideline_contents(g)),
+                )
+                for g in ordered
             ),
         )
 
-        if frame := self._policy_frame_cache.get(key):
-            self._policy_frame_cache.move_to_end(key)
-            return frame
-
-        vectors_by_guideline = await self._embed_guideline_entities(
-            embedder,
-            ordered_guidelines,
-            ordered_policy_contents,
-        )
-        centroid = self._centroid(
-            [vector for vectors in vectors_by_guideline.values() for vector in vectors]
-        )
-        residual_norms = [
-            self._norm(self._subtract(vector, centroid))
-            for vectors in vectors_by_guideline.values()
-            for vector in vectors
-        ]
-        median_residual_norm = median(residual_norms)
-        entities = {
-            guideline_id: tuple(
-                _PolicyEntity(
-                    direction=self._normalize(centered_vector),
-                    boost=self._centrality_boost(self._norm(centered_vector), median_residual_norm),
-                )
-                for vector in vectors
-                for centered_vector in [self._subtract(vector, centroid)]
-            )
-            for guideline_id, vectors in vectors_by_guideline.items()
-        }
-        frame = _PolicyFrame(centroid=centroid, entities=entities)
-
-        self._policy_frame_cache[key] = frame
-        self._policy_frame_cache.move_to_end(key)
-
-        while len(self._policy_frame_cache) > self._MAX_POLICY_FRAME_CACHE_SIZE:
-            self._policy_frame_cache.popitem(last=False)
-
-        return frame
-
-    async def _embed_guideline_entities(
+    def _cache_frame(
         self,
-        embedder: Embedder,
-        guidelines: Sequence[Guideline],
-        guideline_contents: Sequence[Sequence[str]],
-    ) -> dict[GuidelineId, tuple[tuple[float, ...], ...]]:
-        contents = [content for contents in guideline_contents for content in contents]
-        content_vectors = await self._embed_many(embedder, contents)
-        vectors_by_content: dict[str, tuple[float, ...]] = dict(zip(contents, content_vectors))
-
-        return {
-            guideline.id: tuple(vectors_by_content[content] for content in contents)
-            for guideline, contents in zip(guidelines, guideline_contents)
-        }
+        key: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
+        frame: _TrainedFrame,
+    ) -> None:
+        self._frame_cache[key] = frame
+        self._frame_cache.move_to_end(key)
+        while len(self._frame_cache) > self._MAX_FRAME_CACHE_SIZE:
+            self._frame_cache.popitem(last=False)
 
     async def _embed_one(
         self,
@@ -282,16 +463,11 @@ class GuidelineRecaller:
         return [v for v in cached_vectors if v is not None]
 
     def _build_queries(self, context: EngineContext) -> list[str]:
-        queries = [
-            query
-            for query in (
-                self._build_cumulative_query(context),
-                self._build_latest_customer_message_query(context),
-            )
-            if query
-        ]
-
-        return list(dict.fromkeys(queries))
+        # Cumulative conversation plus each individual user turn. Scoring max-pools
+        # over these (see _do_recall), which gives the recaller stickiness: a policy
+        # that was in play at any earlier turn stays relevant for the conversation.
+        queries = [self._build_cumulative_query(context), *self._build_user_turn_queries(context)]
+        return list(dict.fromkeys(query for query in queries if query))
 
     def _build_cumulative_query(self, context: EngineContext) -> str:
         if not context.interaction.messages and not context.state.session_summary:
@@ -306,20 +482,12 @@ class GuidelineRecaller:
 
         return "\n".join(lines)
 
-    def _build_latest_customer_message_query(self, context: EngineContext) -> str:
-        latest_customer_message = next(
-            (
-                message
-                for message in reversed(context.interaction.messages)
-                if message.source == EventSource.CUSTOMER
-            ),
-            None,
-        )
-
-        if not latest_customer_message:
-            return ""
-
-        return f"{latest_customer_message.source}: {latest_customer_message.content}"
+    def _build_user_turn_queries(self, context: EngineContext) -> list[str]:
+        return [
+            f"{message.source}: {message.content}"
+            for message in context.interaction.messages
+            if message.source == EventSource.CUSTOMER
+        ]
 
     def _list_guideline_contents(self, guideline: Guideline) -> list[str]:
         return [self._guideline_embedding_content(guideline), *guideline.signals]
@@ -351,50 +519,3 @@ class GuidelineRecaller:
 
     def _as_tuple(self, vector: Sequence[float]) -> tuple[float, ...]:
         return tuple(float(v) for v in vector)
-
-    def _centroid(self, vectors: Sequence[tuple[float, ...]]) -> tuple[float, ...]:
-        dimensions = len(vectors[0])
-        return tuple(sum(v[i] for v in vectors) / len(vectors) for i in range(dimensions))
-
-    def _subtract(
-        self,
-        left: Sequence[float],
-        right: Sequence[float],
-    ) -> tuple[float, ...]:
-        return tuple(left_value - right_value for left_value, right_value in zip(left, right))
-
-    def _normalize(self, vector: Sequence[float]) -> tuple[float, ...] | None:
-        norm = self._norm(vector)
-
-        if norm <= _EPSILON:
-            return None
-
-        return tuple(v / norm for v in vector)
-
-    def _dot(self, left: Sequence[float], right: Sequence[float]) -> float:
-        return sum(left_value * right_value for left_value, right_value in zip(left, right))
-
-    def _norm(self, vector: Sequence[float]) -> float:
-        return sqrt(sum(v * v for v in vector))
-
-    def _centrality_boost(self, residual_norm: float, median_residual_norm: float) -> float:
-        if self._centrality_boost_beta <= 0.0:
-            return 0.0
-
-        if self._centrality_boost_sharpness <= _EPSILON:
-            return (
-                self._centrality_boost_beta
-                if residual_norm / max(median_residual_norm, _EPSILON) < self._centrality_boost_tau
-                else 0.0
-            )
-
-        normalized_residual = residual_norm / max(median_residual_norm, _EPSILON)
-        weight = 1.0 / (
-            1.0
-            + exp(
-                -(self._centrality_boost_tau - normalized_residual)
-                / self._centrality_boost_sharpness
-            )
-        )
-
-        return self._centrality_boost_beta * weight
