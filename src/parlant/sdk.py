@@ -4270,6 +4270,8 @@ class Server:
         ):
             await self._process_training()
 
+        print()
+
         await self._setup_retrievers()
 
         # Start health check polling to set ready event when the server is ready to receive requests
@@ -4827,8 +4829,6 @@ class Server:
             await indexer.run(progress_callback=callback)
             indexing_progress.update(bar, completed=100)
 
-        print()
-
     async def _process_training(self) -> None:
         training_service = self._container[TrainingService]
 
@@ -4844,15 +4844,13 @@ class Server:
         )
 
         with training_progress:
-            bar = training_progress.add_task("Training recall classifiers", total=100)
+            bar = training_progress.add_task("Training classifiers", total=100)
 
             async def callback(pct: float) -> None:
                 training_progress.update(bar, completed=pct)
 
             await training_service.train(ProgressReport(callback))
             training_progress.update(bar, completed=100)
-
-        print()
 
     async def _apply_evaluation_results(
         self,
