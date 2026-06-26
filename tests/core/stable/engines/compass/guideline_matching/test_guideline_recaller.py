@@ -389,6 +389,21 @@ async def test_that_retrain_calibrates_thresholds_from_negatives() -> None:
         assert math.isfinite(policy.threshold)
 
 
+async def test_that_recall_scores_are_returned_as_normalized_display_scores() -> None:
+    recaller = _radar_recaller()
+    guidelines = list(_create_sample_guidelines().values())
+    context = _context([(EventSource.CUSTOMER, "I'd like my money back")])
+
+    result = await recaller.recall(context, guidelines)
+
+    for recalled in result.recalled_guidelines:
+        assert 0.0 <= recalled.score <= 1.0
+        if recalled.is_relevant:
+            assert recalled.score > 0.5
+        else:
+            assert recalled.score <= 0.5
+
+
 async def test_that_each_agent_gets_its_own_trained_frame() -> None:
     recaller = _radar_recaller()
     guidelines = list(_create_sample_guidelines().values())
@@ -430,6 +445,7 @@ async def test_that_a_pinned_signal_forces_recall() -> None:
     )
     pinned_result = next(r for r in pinned.recalled_guidelines if r.guideline.id == hours.id)
     assert pinned_result.is_relevant
+    assert pinned_result.score > 0.5
 
 
 async def test_that_pin_prefixed_signals_become_must_fire_exemplars() -> None:

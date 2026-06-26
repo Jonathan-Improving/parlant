@@ -209,6 +209,54 @@ async def test_that_matched_guidelines_are_stored_in_session_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_that_storing_session_guidelines_preserves_existing_guidelines() -> None:
+    guideline_1 = create_guideline(condition="customer asks for help", action="ask what they need")
+    guideline_2 = create_guideline(condition="customer asks for refund", action="explain refunds")
+    entity_commands = _FakeEntityCommands()
+    matcher = _make_session_guidelines_matcher(entity_commands)
+    context = _context_with_guidelines(guideline_1, guideline_2, effort=Effort.MEDIUM)
+    context.state.session_guidelines = {guideline_1}
+    context.session = replace(
+        context.session,
+        metadata={_SESSION_GUIDELINE_IDS_METADATA_KEY: [str(guideline_1.id)]},
+    )
+    matches = [
+        (
+            GuidelineMatch(guideline=guideline_2, rationale="newly relevant"),
+            _ContextUsage.INCLUDE_IN_SESSION,
+        )
+    ]
+
+    await matcher._store_session_guidelines(context, matches)
+
+    assert context.state.session_guidelines == {guideline_1, guideline_2}
+    entity_commands.update_session.assert_awaited_once()
+    _, params = entity_commands.update_session.await_args.args
+    assert set(params["metadata"][_SESSION_GUIDELINE_IDS_METADATA_KEY]) == {
+        str(guideline_1.id),
+        str(guideline_2.id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_that_storing_no_new_session_guidelines_does_not_clear_existing_guidelines() -> None:
+    guideline = create_guideline(condition="customer asks for help", action="ask what they need")
+    entity_commands = _FakeEntityCommands()
+    matcher = _make_session_guidelines_matcher(entity_commands)
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+    context.state.session_guidelines = {guideline}
+    context.session = replace(
+        context.session,
+        metadata={_SESSION_GUIDELINE_IDS_METADATA_KEY: [str(guideline.id)]},
+    )
+
+    await matcher._store_session_guidelines(context, [])
+
+    assert context.state.session_guidelines == {guideline}
+    entity_commands.update_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_that_session_only_matches_do_not_enter_turn_matched_guidelines() -> None:
     recalled_guideline = create_guideline(
         condition="customer asks for help",

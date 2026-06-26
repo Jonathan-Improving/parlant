@@ -201,7 +201,10 @@ class Matcher:
         matches: Sequence[tuple[GuidelineMatch, _ContextUsage]],
     ) -> None:
         guidelines_by_id = {g.id: g for g in context.state.usable_guidelines}
-        guideline_ids = {m[0].guideline.id for m in matches}
+        guideline_ids = {
+            *(g.id for g in context.state.session_guidelines),
+            *(m[0].guideline.id for m in matches),
+        }
 
         context.state.session_guidelines = {guidelines_by_id[gid] for gid in guideline_ids}
 
@@ -424,7 +427,9 @@ class Matcher:
 
             match self._get_strategy(context, guideline):
                 case _MatcherStrategy.RECALL:
-                    recall_batch.append(guideline)
+                    # Only process the recall for this guideline if it's not already discovered
+                    if guideline not in context.state.session_guidelines:
+                        recall_batch.append(guideline)
                 case _MatcherStrategy.RANK:
                     rank_batch.append(guideline)
                 case _MatcherStrategy.DISTILL:

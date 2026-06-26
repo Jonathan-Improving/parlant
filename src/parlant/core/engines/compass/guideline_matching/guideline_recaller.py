@@ -15,6 +15,7 @@
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from math import exp
 from typing import Literal, Optional
 import time
 
@@ -248,13 +249,18 @@ class GuidelineRecaller:
                 continue
 
             scores = policy.model.decision(directions)
-            score = float(scores.max())
-            pinned = self._matches_pin(pin_query_units, policy.pin_exemplars)
+            decision_score = float(scores.max())
+            classifier_margin = decision_score - policy.threshold
+            pin_similarity = self._max_pin_similarity(pin_query_units, policy.pin_exemplars)
+            classifier_relevant = classifier_margin > 0.0
+            pin_relevant = (
+                pin_similarity is not None and pin_similarity > self._pin_match_epsilon
+            )
             recalled.append(
                 RecalledGuideline(
                     guideline=guideline,
-                    is_relevant=bool(score > policy.threshold) or pinned,
-                    score=score,
+                    is_relevant=classifier_relevant or pin_relevant,
+                    score=self._calculate_displayed_score(classifier_margin, pin_similarity),
                 )
             )
 
@@ -356,18 +362,41 @@ class GuidelineRecaller:
         )
         return np.asarray(rows[indices], dtype=np.float64)
 
-    def _matches_pin(
+    def _max_pin_similarity(
         self,
         query_units: npt.NDArray[np.float64],
         pin_exemplars: tuple[npt.NDArray[np.float64], ...],
-    ) -> bool:
+    ) -> float | None:
         if not pin_exemplars or query_units.shape[0] == 0:
-            return False
-        for exemplar in pin_exemplars:
-            # query_units and exemplar are unit vectors, so the dot is cosine.
-            if float((query_units @ exemplar).max()) > self._pin_match_epsilon:
-                return True
-        return False
+            return None
+
+        # query_units and exemplars are unit vectors, so the dot is cosine.
+        return max(float((query_units @ exemplar).max()) for exemplar in pin_exemplars)
+
+    def _calculate_displayed_score(
+        self,
+        classifier_margin: float,
+        pin_similarity: float | None,
+    ) -> float:
+        classifier_score = self._sigmoid(classifier_margin)
+
+        if pin_similarity is None or pin_similarity <= self._pin_match_epsilon:
+            return classifier_score
+
+        pin_score = 0.5 + 0.5 * (
+            (pin_similarity - self._pin_match_epsilon)
+            / max(1.0 - self._pin_match_epsilon, _EPSILON)
+        )
+
+        return min(1.0, max(classifier_score, pin_score))
+
+    def _sigmoid(self, x: float) -> float:
+        if x >= 0.0:
+            z = exp(-x)
+            return 1.0 / (1.0 + z)
+
+        z = exp(x)
+        return z / (1.0 + z)
 
     def _training_items(self, guideline: Guideline) -> list[tuple[str, bool]]:
         items: list[tuple[str, bool]] = [(self._guideline_embedding_content(guideline), False)]
