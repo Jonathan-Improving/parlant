@@ -234,6 +234,7 @@ from parlant.core.engines.alpha.engine import AlphaEngine
 from parlant.core.engines.compass.compacter import CompactionSchema
 from parlant.core.engines.compass.engine import CompassEngine
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
@@ -263,6 +264,7 @@ from parlant.core.engines.alpha.tool_event_generator import ToolEventGenerator
 from parlant.core.engines.types import Engine, EngineRegistry
 from parlant.core.services.indexing.indexer import Indexer, NullIndexer
 from parlant.core.services.indexing.evaluation_service import EvaluationService
+from parlant.core.services.training_service import TrainingService
 from parlant.core.loggers import CompositeLogger, FileLogger, LogLevel, Logger
 from parlant.core.application import Application
 from parlant.core.store_provider import BasicStoreProvider, StoreProvider, StoreProviderHints
@@ -683,6 +685,7 @@ async def setup_container() -> AsyncIterator[Container]:
     _define_singleton(c, JourneyGuidelineProjection, JourneyGuidelineProjection)
 
     _define_singleton(c, EvaluationService, EvaluationService)
+    _define_singleton(c, TrainingService, TrainingService)
     _define_singleton(c, EvaluationListener, PollingEvaluationListener)
     _define_singleton(c, Indexer, NullIndexer)
 
@@ -707,6 +710,10 @@ async def setup_container() -> AsyncIterator[Container]:
     _define_singleton(
         c, GuidelineMatchingStrategyResolver, GenericGuidelineMatchingStrategyResolver
     )
+
+    # Must be a singleton: retrain() (via TrainingService / SDK startup) and the
+    # recall path (via the compass Matcher) have to share the same trained frame.
+    _define_singleton(c, GuidelineRecaller, GuidelineRecaller)
 
     _define_singleton(c, GuidelineMatcher, GuidelineMatcher)
 

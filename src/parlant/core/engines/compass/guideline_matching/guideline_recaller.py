@@ -24,6 +24,7 @@ import numpy.typing as npt
 from parlant.core.async_utils import safe_gather
 from parlant.core.services.indexing.common import ProgressReport
 from parlant.core.engines.compass.response_state import EngineContext
+from parlant.core.agents import AgentId
 from parlant.core.common import xxh3_checksum
 from parlant.core.guidelines import Guideline, GuidelineId
 from parlant.core.nlp.embedding import Embedder, EmbeddingCache
@@ -152,14 +153,15 @@ class GuidelineRecaller:
         self._logistic_C = logistic_C
         self._pin_match_epsilon = pin_match_epsilon
         self._max_negatives = max_negatives
-        # The frame from the last explicit retrain() — trained over the full
-        # inventory, so its discriminants have the best possible negatives. Recall
-        # uses it whenever it covers the requested batch.
-        self._current_frame: _TrainedFrame | None = None
-        # Backstop LRU for batches the current frame doesn't cover (e.g. before the
-        # first retrain, or for a guideline added since): lazily train on the batch.
+        # One trained frame per agent. A policy's discriminant and its
+        # negative-calibrated threshold are only meaningful relative to that agent's
+        # OWN competing policies, so frames are never shared across agents.
+        self._frames_by_agent: dict[AgentId, _TrainedFrame] = {}
+        # Backstop LRU keyed by (agent, inventory checksum) for the window before an
+        # agent has been trained (or for a batch its frame doesn't cover): lazily
+        # train on the batch.
         self._frame_cache: OrderedDict[
-            tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], _TrainedFrame
+            tuple[AgentId, str, tuple[tuple[str, tuple[str, ...]], ...]], _TrainedFrame
         ] = OrderedDict()
 
     async def recall(
@@ -177,26 +179,28 @@ class GuidelineRecaller:
 
     async def retrain(
         self,
+        agent_id: AgentId,
         guidelines: Sequence[Guideline],
         progress_report: Optional[ProgressReport] = None,
     ) -> None:
-        """Train each guideline's relevance discriminant against the whole inventory.
+        """Train an agent's per-policy discriminants against that agent's own
+        guideline space (``guidelines`` should be the agent's full inventory).
 
         Offline, idempotent, and reported per guideline via ``progress_report`` (for
-        the SDK progress bar / the POST /train job monitor). Stores the result as the
-        current frame, which recall then uses directly — inference stays a dot product.
+        the SDK progress bar / the POST /train job monitor). Stores the agent's frame,
+        which recall then uses directly — inference stays a dot product.
         """
         with self._tracer.span("guideline.recall.retrain"):
             if not guidelines:
-                self._current_frame = _TrainedFrame(
+                self._frames_by_agent[agent_id] = _TrainedFrame(
                     centroid=np.zeros(0, dtype=np.float64), by_guideline={}
                 )
                 return
 
             embedder = await self._nlp_service.get_embedder()
             frame = await self._train_frame(embedder, guidelines, progress_report)
-            self._current_frame = frame
-            self._cache_frame(self._frame_key(embedder, guidelines), frame)
+            self._frames_by_agent[agent_id] = frame
+            self._cache_frame(self._frame_key(agent_id, embedder, guidelines), frame)
 
     async def _do_recall(
         self,
@@ -222,7 +226,7 @@ class GuidelineRecaller:
 
         embedder = await self._nlp_service.get_embedder()
         frame, query_vectors = await safe_gather(
-            self._frame_for(embedder, guidelines),
+            self._frame_for(context.agent.id, embedder, guidelines),
             self._embed_many(embedder, queries),
         )
 
@@ -258,17 +262,17 @@ class GuidelineRecaller:
 
     async def _frame_for(
         self,
+        agent_id: AgentId,
         embedder: Embedder,
         guidelines: Sequence[Guideline],
     ) -> _TrainedFrame:
         requested_ids = {g.id for g in guidelines}
 
-        if self._current_frame is not None and requested_ids <= set(
-            self._current_frame.by_guideline
-        ):
-            return self._current_frame
+        agent_frame = self._frames_by_agent.get(agent_id)
+        if agent_frame is not None and requested_ids <= set(agent_frame.by_guideline):
+            return agent_frame
 
-        key = self._frame_key(embedder, guidelines)
+        key = self._frame_key(agent_id, embedder, guidelines)
         if frame := self._frame_cache.get(key):
             self._frame_cache.move_to_end(key)
             return frame
@@ -385,11 +389,13 @@ class GuidelineRecaller:
 
     def _frame_key(
         self,
+        agent_id: AgentId,
         embedder: Embedder,
         guidelines: Sequence[Guideline],
-    ) -> tuple[str, tuple[tuple[str, tuple[str, ...]], ...]]:
+    ) -> tuple[AgentId, str, tuple[tuple[str, tuple[str, ...]], ...]]:
         ordered = sorted(guidelines, key=lambda g: str(g.id))
         return (
+            agent_id,
             embedder.id,
             tuple(
                 (
@@ -402,7 +408,7 @@ class GuidelineRecaller:
 
     def _cache_frame(
         self,
-        key: tuple[str, tuple[tuple[str, tuple[str, ...]], ...]],
+        key: tuple[AgentId, str, tuple[tuple[str, tuple[str, ...]], ...]],
         frame: _TrainedFrame,
     ) -> None:
         self._frame_cache[key] = frame

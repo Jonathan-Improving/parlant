@@ -448,6 +448,8 @@ async def container(
         else:
             embedding_cache = NullEmbeddingCache()
 
+        container[EmbeddingCache] = embedding_cache
+
         container[JourneyStore] = await stack.enter_async_context(
             JourneyVectorStore(
                 container[IdGenerator],

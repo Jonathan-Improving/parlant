@@ -35,6 +35,7 @@ from parlant.api.health import configure_healthz
 from parlant.core.health import HealthReporter
 from parlant.api import agents, capabilities
 from parlant.api import evaluations
+from parlant.api import train as train_api
 from parlant.api import journeys
 from parlant.api import relationships
 from parlant.api import sessions
@@ -59,6 +60,7 @@ from parlant.core.tracer import Tracer
 from parlant.core.common import ItemNotFoundError, generate_id
 from parlant.core.loggers import Logger
 from parlant.core.application import Application
+from parlant.core.services.training_service import TrainingService
 
 
 mimetypes.add_type("text/javascript", ".js")
@@ -362,6 +364,14 @@ async def create_api_app(
         router=evaluations.create_router(
             authorization_policy=authorization_policy,
             app=application,
+        ),
+    )
+
+    api_app.include_router(
+        prefix="/train",
+        router=train_api.create_router(
+            authorization_policy=authorization_policy,
+            training_service=container[TrainingService],
         ),
     )
 

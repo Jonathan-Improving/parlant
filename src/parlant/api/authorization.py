@@ -71,6 +71,9 @@ class Operation(Enum):
     CREATE_EVALUATION = "create_evaluation"
     READ_EVALUATION = "read_evaluation"
 
+    CREATE_TRAINING = "create_training"
+    READ_TRAINING = "read_training"
+
     CREATE_TERM = "create_term"
     READ_TERM = "read_term"
     LIST_TERMS = "list_terms"

@@ -28,12 +28,15 @@ from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.engines.engine_context import EngineContext
 from parlant.core.guidelines import Guideline, GuidelineContent
-from parlant.core.nlp.embedding import Embedder, EmbeddingCache, EmbeddingResult, NullEmbeddingCache
+from parlant.core.nlp.embedding import Embedder, EmbeddingResult
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.services.indexing.common import ProgressReport
 from parlant.core.sessions import EventSource
 
+from parlant.core.agents import Agent
+
 from tests.core.stable.engines.compass.guideline_matching.utils import (
+    create_agent,
     create_engine_context,
     create_guideline,
 )
@@ -41,7 +44,6 @@ from tests.core.stable.engines.compass.guideline_matching.utils import (
 
 @fixture
 def recaller(container: Container) -> GuidelineRecaller:
-    container[EmbeddingCache] = NullEmbeddingCache()
     return container[GuidelineRecaller]
 
 
@@ -163,8 +165,11 @@ def _radar_recaller(
     )
 
 
-def _context(conversation: list[tuple[EventSource, str]]) -> EngineContext[Any]:
-    context = create_engine_context(conversation=conversation)
+def _context(
+    conversation: list[tuple[EventSource, str]],
+    agent: Agent | None = None,
+) -> EngineContext[Any]:
+    context = create_engine_context(conversation=conversation, agent=agent)
     context.state = ResponseState()
     return context
 
@@ -349,6 +354,7 @@ async def test_that_the_recaller_includes_a_single_candidate_guideline() -> None
 async def test_that_retrain_reports_progress_and_warms_recall() -> None:
     recaller = _radar_recaller()
     guidelines = list(_create_sample_guidelines().values())
+    agent = create_agent()
 
     seen: list[float] = []
 
@@ -356,13 +362,13 @@ async def test_that_retrain_reports_progress_and_warms_recall() -> None:
         seen.append(percentage)
 
     report = ProgressReport(on_progress)
-    await recaller.retrain(guidelines, report)
+    await recaller.retrain(agent.id, guidelines, report)
 
     assert report.percentage == 100.0
     assert seen and seen[-1] == 100.0
 
-    # Recall now serves off the trained current frame.
-    context = _context([(EventSource.CUSTOMER, "I'd like my money back")])
+    # Recall for this agent now serves off the trained frame.
+    context = _context([(EventSource.CUSTOMER, "I'd like my money back")], agent=agent)
     result = await recaller.recall(context, guidelines)
     relevance_by_id = {r.guideline.id: r.is_relevant for r in result.recalled_guidelines}
     assert relevance_by_id[guidelines[0].id] or any(relevance_by_id.values())
@@ -371,15 +377,29 @@ async def test_that_retrain_reports_progress_and_warms_recall() -> None:
 async def test_that_retrain_calibrates_thresholds_from_negatives() -> None:
     recaller = _radar_recaller()
     guidelines = list(_create_sample_guidelines().values())
+    agent = create_agent()
 
-    await recaller.retrain(guidelines)
+    await recaller.retrain(agent.id, guidelines)
 
-    assert recaller._current_frame is not None
+    frame = recaller._frames_by_agent[agent.id]
     for guideline in guidelines:
-        policy = recaller._current_frame.by_guideline[guideline.id]
+        policy = frame.by_guideline[guideline.id]
         # Every policy has negatives (the other policies), so its threshold is a real
         # negative-calibrated percentile — not the degenerate "never fire" infinity.
         assert math.isfinite(policy.threshold)
+
+
+async def test_that_each_agent_gets_its_own_trained_frame() -> None:
+    recaller = _radar_recaller()
+    guidelines = list(_create_sample_guidelines().values())
+    agent_a = create_agent()
+    agent_b = create_agent()
+
+    await recaller.retrain(agent_a.id, guidelines)
+
+    # Agent A is trained; agent B is not — frames are strictly per-agent.
+    assert agent_a.id in recaller._frames_by_agent
+    assert agent_b.id not in recaller._frames_by_agent
 
 
 async def test_that_a_pinned_signal_forces_recall() -> None:
@@ -428,7 +448,7 @@ async def test_that_pin_prefixed_signals_become_must_fire_exemplars() -> None:
         tags=[],
     )
 
-    await recaller.retrain([hours, refund])
+    agent = create_agent()
+    await recaller.retrain(agent.id, [hours, refund])
 
-    assert recaller._current_frame is not None
-    assert len(recaller._current_frame.by_guideline[hours.id].pin_exemplars) == 1
+    assert len(recaller._frames_by_agent[agent.id].by_guideline[hours.id].pin_exemplars) == 1
