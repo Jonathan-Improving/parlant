@@ -268,7 +268,10 @@ class CompassEngine(Engine):
             result = await self._compacter.compact(context)
             context.state.session_summary = result.summary
 
-            self._logger.debug(f"Compacted session {context.session.id}: {result.generation_info}")
+            self._logger.debug(
+                f"Compacted session {context.session.id}: {result.generation_info}\n\n"
+                f"Summary:\n{result.summary}"
+            )
 
             await context.session_event_emitter.emit_message_event(
                 trace_id=self._tracer.trace_id,

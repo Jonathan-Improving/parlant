@@ -111,6 +111,18 @@ class _FakeEntityQueries:
         return self.events
 
 
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.debug_messages: list[str] = []
+        self.error_messages: list[str] = []
+
+    def debug(self, message: str) -> None:
+        self.debug_messages.append(message)
+
+    def error(self, message: str) -> None:
+        self.error_messages.append(message)
+
+
 def _compacter(generator: _FakeCompactionGenerator) -> Compacter:
     tracer = LocalTracer()
     return Compacter(
@@ -369,8 +381,9 @@ async def test_compact_if_needed_reloads_history_before_generating_summary() -> 
     compacter.set_policy(_policy(threshold=1))
 
     tracer = LocalTracer()
+    logger = _RecordingLogger()
     engine = CompassEngine(
-        logger=StdoutLogger(tracer),
+        logger=cast(Any, logger),
         tracer=tracer,
         meter=cast(Any, object()),
         matcher=cast(Any, object()),
@@ -394,6 +407,7 @@ async def test_compact_if_needed_reloads_history_before_generating_summary() -> 
     assert emitted_events[-1].kind == EventKind.MESSAGE
     assert emitted_events[-1].metadata == {"source": "compacter"}
     assert cast(dict[str, Any], emitted_events[-1].data)["message"] == "fresh compacted summary"
+    assert any("Summary:\nfresh compacted summary" in message for message in logger.debug_messages)
 
 
 @pytest.mark.asyncio
