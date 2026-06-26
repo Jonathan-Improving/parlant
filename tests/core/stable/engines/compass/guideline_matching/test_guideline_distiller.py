@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, Mapping, cast
 
 from lagom import Container
 from pytest import fixture
@@ -23,6 +23,7 @@ from pytest import fixture
 from parlant.core.agents import Effort
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
     GuidelineDistiller,
+    LowEffortGuidelineDistillationSchema,
     _format_guideline,
 )
 from parlant.core.engines.compass.response_state import ResponseState
@@ -32,8 +33,13 @@ from parlant.core.common import JSONSerializable
 from parlant.core.context_variables import ContextVariable, ContextVariableValue
 from parlant.core.emissions import EmittedEvent
 from parlant.core.glossary import Term
+from parlant.core.loggers import StdoutLogger
+from parlant.core.nlp.generation import SchematicGenerationResult
+from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
+from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.sessions import EventSource
 from parlant.core.tools import Tool, ToolId, ToolOverlap
+from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import (
     create_agent,
@@ -177,6 +183,77 @@ async def base_test_that_a_guideline_is_distilled_correctly(
 
 def test_that_a_guideline_distiller_can_be_created(distiller: GuidelineDistiller) -> None:
     assert distiller is not None
+
+
+class _ConcurrentLowEffortGenerator:
+    def __init__(self, expected_call_count: int) -> None:
+        self.expected_call_count = expected_call_count
+        self.started_call_count = 0
+        self._all_started = asyncio.Event()
+
+    async def generate(
+        self,
+        prompt: Any,
+        hints: Mapping[str, Any] = {},
+    ) -> SchematicGenerationResult[LowEffortGuidelineDistillationSchema]:
+        self.started_call_count += 1
+
+        if self.started_call_count >= self.expected_call_count:
+            self._all_started.set()
+
+        await asyncio.wait_for(self._all_started.wait(), timeout=1.0)
+
+        return SchematicGenerationResult(
+            content=LowEffortGuidelineDistillationSchema(distilled_action="continue"),
+            info=GenerationInfo(
+                schema_name="LowEffortGuidelineDistillationSchema",
+                model=self.id,
+                duration=0.01,
+                usage=UsageInfo(input_tokens=1, output_tokens=1),
+            ),
+        )
+
+    @property
+    def id(self) -> str:
+        return "concurrent-low-effort-generator"
+
+    @property
+    def max_tokens(self) -> int:
+        return 100_000
+
+    @property
+    def tokenizer(self) -> EstimatingTokenizer:
+        return cast(EstimatingTokenizer, object())
+
+
+async def test_that_distiller_fans_out_all_guidelines_concurrently() -> None:
+    generator = _ConcurrentLowEffortGenerator(expected_call_count=2)
+    tracer = LocalTracer()
+    distiller = GuidelineDistiller(
+        logger=StdoutLogger(tracer),
+        tracer=tracer,
+        low_effort_schematic_generator=cast(Any, generator),
+        high_effort_schematic_generator=cast(Any, object()),
+    )
+
+    async def no_shots() -> Sequence[Any]:
+        return []
+
+    distiller.shots = no_shots  # type: ignore[method-assign]
+
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hello")])
+    context.state = ResponseState(agent_effort=Effort.MEDIUM)
+    guidelines = [
+        create_guideline(condition="condition one", action="action one"),
+        create_guideline(condition="condition two", action="action two"),
+    ]
+
+    result = await distiller.distill(context, guidelines)
+
+    assert generator.started_call_count == 2
+    assert len(result.distilled_guidelines) == 2
+    assert result.generation_info
+    assert result.generation_info.duration >= 0.0
 
 
 def test_that_distiller_formats_description_only_policy_guideline() -> None:

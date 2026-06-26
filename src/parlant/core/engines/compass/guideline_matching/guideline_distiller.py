@@ -124,21 +124,18 @@ class GuidelineDistiller:
             return GuidelineDistillationResult([], None)
 
         with self._tracer.span("guideline.distill"):
-            if len(guidelines) > 1:
-                # Warm-then-fan-out (see GuidelineRanker.rank): distill the first
-                # guideline and AWAIT it so the shared prompt prefix is cached, then
-                # fan out the rest concurrently against the warm cache.
-                first = await self._distill_guideline(context, guidelines[0])
-                rest = await asyncio.gather(
-                    *(self._distill_guideline(context, guideline) for guideline in guidelines[1:])
-                )
-                results = [first, *rest]
-            else:
-                results = [await self._distill_guideline(context, guidelines[0])]
+            t_start = asyncio.get_event_loop().time()
+            results = await asyncio.gather(
+                *(self._distill_guideline(context, guideline) for guideline in guidelines)
+            )
+            t_end = asyncio.get_event_loop().time()
 
             return GuidelineDistillationResult(
                 distilled_guidelines=[distilled for distilled, _ in results],
-                generation_info=aggregate_generation_info([info for _, info in results]),
+                generation_info=aggregate_generation_info(
+                    [info for _, info in results],
+                    total_duration=t_end - t_start,
+                ),
             )
 
     async def _distill_guideline(

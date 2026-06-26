@@ -246,6 +246,8 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
         prompt: str | PromptBuilder,
         hints: Mapping[str, Any] = {},
     ) -> SchematicGenerationResult[T]:
+        t_start = time.time()
+
         if isinstance(prompt, PromptBuilder):
             prompt = prompt.build()
 
@@ -304,7 +306,6 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
 
         config = google.genai.types.GenerateContentConfig(**config_kwargs)
 
-        t_start = time.time()
         try:
             response = await self._client.aio.models.generate_content(
                 model=self.model_name,
@@ -341,8 +342,6 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
                 ),
             )
 
-        t_end = time.time()
-
         assert response.candidates
         assert response.candidates[0].content
         assert response.candidates[0].content.parts
@@ -375,6 +374,7 @@ class GeminiSchematicGenerator(BaseSchematicGenerator[T]):
             reasoning_tokens = (
                 response.usage_metadata.thoughts_token_count or 0 if response.usage_metadata else 0
             )
+            t_end = time.time()
 
             return SchematicGenerationResult(
                 content=model_content,

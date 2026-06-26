@@ -37,6 +37,7 @@ import google.genai.types as genai_types
 import pytest
 from google.genai.errors import ClientError
 
+import parlant.adapters.nlp.gemini_service as gemini_service
 from parlant.adapters.nlp.gemini_service import (
     GEMINI_THOUGHT_SIGNATURE_KEY,
     SYSTEM_UPDATE_TOOL_NAME,
@@ -509,6 +510,43 @@ async def test_that_a_breakpoint_request_creates_cache_and_sends_only_the_live_s
     config = generate.await_args.kwargs["config"]
     assert config.cached_content == "cachedContents/abc"
     assert not config.tools
+
+
+async def test_that_schematic_duration_includes_cache_creation(
+    schematic: Gemini_3_1_Flash_Lite[_CacheProbe],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 0.0}
+
+    def fake_time() -> float:
+        return clock["now"]
+
+    created = SimpleNamespace(
+        name="cachedContents/abc",
+        expire_time=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+    async def create_cache(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        clock["now"] += 2.0
+        return created
+
+    async def generate_content(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        clock["now"] += 1.0
+        return _fake_generation({"answer": "ranked"})
+
+    monkeypatch.setattr(gemini_service.time, "time", fake_time)
+    schematic._client = _FakeAioClient(  # type: ignore[assignment]
+        schematic._client,
+        create=AsyncMock(side_effect=create_cache),
+        generate=AsyncMock(side_effect=generate_content),
+    )
+
+    result = await schematic._do_generate(
+        "STABLE HEAD\n# LIVE\nbody",
+        hints={"cache": {"key": "s1", "breakpoint": "# LIVE", "ttl": 600}},
+    )
+
+    assert result.info.duration == 3.0
 
 
 async def test_that_a_breakpoint_cache_miss_sends_the_full_prompt_with_inline_tools(

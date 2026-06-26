@@ -714,18 +714,30 @@ class Matcher:
         for tool_id in candidate_ids:
             names_by_service[tool_id.service_name].append(tool_id.tool_name)
 
-        results: list[ToolRelevanceResult] = []
-        for service_name, names in names_by_service.items():
+        async def find_relevant_tools_for_service(
+            service_name: str,
+            names: Sequence[str],
+        ) -> Sequence[ToolRelevanceResult]:
             try:
                 service = await self._entity_queries.read_tool_service(service_name)
-                results.extend(
-                    await service.find_relevant_tools(query, names, self._MAX_AVAILABLE_TOOLS)
-                )
+                return await service.find_relevant_tools(query, names, self._MAX_AVAILABLE_TOOLS)
             except Exception as e:
                 self._logger.warning(
                     f"Failed to rank tools for service {service_name}: {e!r}\n"
                     f"{traceback.format_exc()}"
                 )
+                return []
+
+        results: list[ToolRelevanceResult] = list(
+            chain.from_iterable(
+                await safe_gather(
+                    *(
+                        find_relevant_tools_for_service(service_name, names)
+                        for service_name, names in names_by_service.items()
+                    )
+                )
+            )
+        )
 
         results.sort(key=lambda r: r.score, reverse=True)
         context.state.agent_tool_pool = [r.tool for r in results]
