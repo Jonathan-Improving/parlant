@@ -953,7 +953,14 @@ class BaseLoop(Loop):
             # A hook requested that we not proceed with generating a response.
             return LoopResult(job=job, steps=[])
 
-        history, instructions_index = await self._history_builder.build(job)
+        # Don't seed the turn instructions here: the first _run_step's
+        # _update_step_instructions builds and places them (and on high/max effort,
+        # which don't cache step_instructions, seeding here would build them twice).
+        # _last_user_message_index (the seed's placement) is identical to refresh's
+        # insertion index, so placement is unchanged.
+        history, instructions_index = await self._history_builder.build(
+            job, include_turn_instructions=False
+        )
         state = _LoopState(
             history=history,
             instructions_index=instructions_index,
