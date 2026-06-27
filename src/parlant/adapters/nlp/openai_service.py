@@ -55,7 +55,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_distiller import 
     LowEffortGuidelineDistillationSchema,
 )
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
-from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
+from parlant.core.engines.compass.reviewer import HighEffortReviewSchema, LowEffortReviewSchema
 from parlant.core.engines.alpha.tool_calling.single_tool_batch import (
     NonConsequentialToolBatchSchema,
     SingleToolBatchSchema,
@@ -546,6 +546,26 @@ class GPT_5_4_Mini(OpenAISchematicGenerator[T]):
             meter=meter,
             health_reporter=health_reporter,
             # tiktoken doesn't know gpt-5.4-mini; use the gpt-5 tokenizer (same family).
+            tokenizer_model_name="gpt-5",
+        )
+
+    @property
+    @override
+    def max_tokens(self) -> int:
+        return 400_000
+
+
+class GPT_5_4(OpenAISchematicGenerator[T]):
+    def __init__(
+        self, logger: Logger, tracer: Tracer, meter: Meter, health_reporter: HealthReporter
+    ) -> None:
+        super().__init__(
+            model_name="gpt-5.4",
+            logger=logger,
+            tracer=tracer,
+            meter=meter,
+            health_reporter=health_reporter,
+            # tiktoken doesn't know gpt-5.4; use the gpt-5 tokenizer (same family).
             tokenizer_model_name="gpt-5",
         )
 
@@ -1330,14 +1350,14 @@ Please set OPENAI_API_KEY in your environment before running Parlant.
                     JourneyNextStepSelectionSchema: GPT_4_1[JourneyNextStepSelectionSchema],
                     JourneyBacktrackCheckSchema: GPT_4_1_Mini[JourneyBacktrackCheckSchema],
                     GuidelineRankSchema: GPT_5_4_Nano[GuidelineRankSchema],
-                    LowEffortGuidelineDistillationSchema: GPT_5_4_Nano[
+                    LowEffortGuidelineDistillationSchema: GPT_5_4_Mini[
                         LowEffortGuidelineDistillationSchema
                     ],
                     HighEffortGuidelineDistillationSchema: GPT_5_4_Mini[
                         HighEffortGuidelineDistillationSchema
                     ],
-                    LowEffortReview: GPT_5_4_Mini[LowEffortReview],
-                    HighEffortReview: GPT_5_4_Mini[HighEffortReview],
+                    LowEffortReviewSchema: GPT_5_4_Mini[LowEffortReviewSchema],
+                    HighEffortReviewSchema: GPT_5_4[HighEffortReviewSchema],
                 }.get(t, GPT_4o_24_08_06[t])(  # type: ignore
                     self._logger, self._tracer, self._meter, self._health_reporter
                 )

@@ -35,7 +35,12 @@ from parlant.adapters.nlp.common import normalize_json_output, record_llm_metric
 from parlant.adapters.nlp.hugging_face import JinaAIEmbedder
 
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+    HighEffortGuidelineDistillationSchema,
+    LowEffortGuidelineDistillationSchema,
+)
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.reviewer import LowEffortReviewSchema
 from parlant.core.tracer import Tracer
 from parlant.core.meter import Meter
 from parlant.core.nlp.embedding import Embedder, EmbedderHints
@@ -1054,7 +1059,12 @@ Please set ANTHROPIC_API_KEY in your environment before running Parlant.
     ) -> AnthropicAISchematicGenerator[T]:
         # The Compass guideline ranker is a cheap first-pass filter: serve it from
         # Haiku regardless of the requested schema.
-        if t is GuidelineRankSchema:
+        if t in (
+            GuidelineRankSchema,
+            LowEffortGuidelineDistillationSchema,
+            HighEffortGuidelineDistillationSchema,
+            LowEffortReviewSchema,
+        ):
             return Claude_Haiku_4_5[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )

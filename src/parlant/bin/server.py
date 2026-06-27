@@ -239,7 +239,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_distiller import 
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
-from parlant.core.engines.compass.reviewer import HighEffortReview, LowEffortReview
+from parlant.core.engines.compass.reviewer import HighEffortReviewSchema, LowEffortReviewSchema
 from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.guideline_tool_associations import (
     GuidelineToolAssociationDocumentStore,
@@ -995,8 +995,8 @@ async def initialize_container(
         GuidelineRankSchema,
         LowEffortGuidelineDistillationSchema,
         HighEffortGuidelineDistillationSchema,
-        LowEffortReview,
-        HighEffortReview,
+        LowEffortReviewSchema,
+        HighEffortReviewSchema,
         CompactionSchema,
     ):
         generator = await nlp_service_instance.get_schematic_generator(schema)

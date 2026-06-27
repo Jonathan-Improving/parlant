@@ -31,7 +31,7 @@ from parlant.core.tools import Tool, ToolId
 from parlant.core.tracer import Tracer
 
 
-class HighEffortReview(DefaultBaseModel):
+class HighEffortReviewSchema(DefaultBaseModel):
     restated_user_request: str | None = None
     relevant_policies: str | None = None
     remaining_tasks: str | None = None
@@ -39,7 +39,7 @@ class HighEffortReview(DefaultBaseModel):
     adjusted_reasoning: str | None = None
 
 
-class LowEffortReview(DefaultBaseModel):
+class LowEffortReviewSchema(DefaultBaseModel):
     breaches: bool | None = None
     adjusted_reasoning: str | None = None
 
@@ -67,8 +67,8 @@ class Reviewer:
         self,
         logger: Logger,
         tracer: Tracer,
-        low_effort_schematic_generator: SchematicGenerator[LowEffortReview],
-        high_effort_schematic_generator: SchematicGenerator[HighEffortReview],
+        low_effort_schematic_generator: SchematicGenerator[LowEffortReviewSchema],
+        high_effort_schematic_generator: SchematicGenerator[HighEffortReviewSchema],
     ) -> None:
         self._logger = logger
         self._tracer = tracer
@@ -102,7 +102,7 @@ class Reviewer:
             if is_constructive:
                 self._logger.debug(
                     f"{self.__class__.__name__} constructive feedback:\n\n"
-                    f"{self._format_review_log(result)}"
+                    f"{self._format_review_log(result, tool_calls)}"
                 )
             else:
                 self._logger.debug(
@@ -462,7 +462,7 @@ These calls have not been executed yet and you need to review them for correctne
             [g for g in context.state.session_guidelines if g.criticality == Criticality.LOW]
         )
         builder.add_system_wide_guidelines(
-            context.state.session_guidelines,
+            list(context.state.session_guidelines),
             context.state.tools_by_guideline,
         )
 
@@ -492,9 +492,17 @@ Only offer information and offer services that are sourced from this prompt. Nev
 
         return json.dumps(result, indent=4)
 
-    def _format_review_log(self, result: ReviewResult) -> str:
+    def _format_review_log(
+        self,
+        result: ReviewResult,
+        tool_calls: Sequence[ToolCallPart] = (),
+    ) -> str:
         output = StringIO()
         output.write(f"Usage: {result.generation_info}\n\n")
+        if tool_calls:
+            output.write("Reviewed tool calls:\n")
+            output.write(self._format_tool_calls(tool_calls))
+            output.write("\n\n")
         output.write("Result:\n")
         output.write(
             json.dumps(

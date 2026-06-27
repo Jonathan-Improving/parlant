@@ -2699,8 +2699,8 @@ class Journey:
     async def create_canned_response(
         self,
         template: str,
-        tags: list[Tag] = [],
-        signals: list[str] = [],
+        tags: Sequence[Tag] = [],
+        signals: Sequence[str] = [],
         metadata: Mapping[str, JSONSerializable] = {},
         field_dependencies: Sequence[str] = (),
     ) -> CannedResponseId:
@@ -3525,8 +3525,8 @@ class Agent:
     async def create_canned_response(
         self,
         template: str,
-        tags: list[Tag] = [],
-        signals: list[str] = [],
+        tags: Sequence[Tag] = [],
+        signals: Sequence[str] = [],
         metadata: Mapping[str, JSONSerializable] = {},
         field_dependencies: Sequence[str] = (),
     ) -> CannedResponseId:
@@ -5509,8 +5509,8 @@ class Server:
     async def create_canned_response(
         self,
         template: str,
-        tags: list[Tag] = [],
-        signals: list[str] = [],
+        tags: Sequence[Tag] = [],
+        signals: Sequence[str] = [],
         metadata: Mapping[str, JSONSerializable] = {},
         field_dependencies: Sequence[str] = (),
     ) -> CannedResponseId:
