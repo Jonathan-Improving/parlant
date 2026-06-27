@@ -830,6 +830,9 @@ In all other situations, you are expected to follow the instructions when and as
             else:
                 text = f"### Instruction #{i}: {g.content.action}\n\n"
 
+            if g.criticality == Criticality.HIGH:
+                text += "IMPORTANT: This one is a high-criticality instruction. Pay extra attention to its details and do not violate it, even if the user asks you to.\n\n"
+
             if g.content.description:
                 text += f"{g.content.description.strip()}"
             elif g.id not in tools_by_guideline:
