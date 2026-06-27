@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, cast
 
 from parlant.core.agents import Effort
@@ -22,6 +23,7 @@ from parlant.core.engines.compass.loop.base_loop import (
     _LoopState,
     _PROVIDER_DATA_KEY,
     _ToolPreambleState,
+    _ToolStepController,
 )
 from parlant.core.engines.compass.loop.blocking_loop import BlockingLoop
 from parlant.core.engines.compass.loop.loop import LoopJob
@@ -45,7 +47,8 @@ from parlant.core.nlp.react import (
     Usage,
 )
 from parlant.core.sessions import EventKind, EventSource, ToolEventData
-from parlant.core.tools import ToolId, ToolResult
+from parlant.core.tools import Tool, ToolId, ToolOverlap, ToolResult
+from parlant.core.nlp.tokenization import ZeroEstimatingTokenizer
 from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import (
@@ -66,6 +69,7 @@ def _make_blocking_loop(logger: Logger | None = None) -> BlockingLoop:
         meter=cast(Any, None),
         optimization_policy=cast(Any, None),
         react=cast(Any, None),
+        tokenizer=ZeroEstimatingTokenizer(),
         tool_runner=cast(Any, None),
         reviewer=cast(Any, None),
         hooks=EngineHooks(),
@@ -74,6 +78,28 @@ def _make_blocking_loop(logger: Logger | None = None) -> BlockingLoop:
 
 def _encouraged_preamble_state() -> _ToolPreambleState:
     return _ToolPreambleState(PreambleConfiguration.encourage())
+
+
+def _tool(name: str, *, consequential: bool) -> Tool:
+    return Tool(
+        name=name,
+        creation_utc=datetime.now(timezone.utc),
+        description="",
+        metadata={},
+        parameters={},
+        required=[],
+        consequential=consequential,
+        overlap=ToolOverlap.NONE,
+    )
+
+
+def _offer_tool(context: Any, tool: Tool) -> None:
+    """Put a tool in the offered catalog so the loop can resolve it (and read its
+    consequential flag for review gating)."""
+    context.state.available_tools = [tool]
+    context.state.tool_ids_by_name = {
+        tool.name: ToolId(service_name="test_service", tool_name=tool.name)
+    }
 
 
 class _NoReplayReact:
@@ -153,6 +179,56 @@ class _RejectingReviewer:
                 "adjusted_reasoning": "Ask the user for the missing confirmation instead.",
             },
         )()
+
+
+class _SpyReviewer:
+    def __init__(self) -> None:
+        self.called = False
+
+    async def review_tool_calls(
+        self,
+        context: Any,
+        reasoning: str,
+        tool_calls: list[ToolCallPart],
+    ) -> Any:
+        self.called = True
+        return type("ReviewResult", (), {"todo": "", "adjusted_reasoning": None})()
+
+
+def _controller(reviewer: _SpyReviewer) -> _ToolStepController:
+    return _ToolStepController(
+        logger=StdoutLogger(LocalTracer()),
+        react=cast(Any, None),
+        tool_runner=cast(Any, None),
+        reviewer=cast(Any, lambda: reviewer),
+    )
+
+
+async def _review(reviewer: _SpyReviewer, *, effort: Effort, consequential: bool) -> None:
+    context = create_engine_context(conversation=[(EventSource.CUSTOMER, "please charge it")])
+    context.state = ResponseState(agent_effort=effort)
+    _offer_tool(context, _tool("charge_card", consequential=consequential))
+    await _controller(reviewer).review_tool_calls(
+        context, "reasoning", [ToolCallPart(id="c1", name="charge_card", args={})]
+    )
+
+
+async def test_that_a_consequential_tool_call_triggers_review_below_max_effort() -> None:
+    reviewer = _SpyReviewer()
+    await _review(reviewer, effort=Effort.HIGH, consequential=True)
+    assert reviewer.called
+
+
+async def test_that_a_non_consequential_tool_call_skips_review_below_max_effort() -> None:
+    reviewer = _SpyReviewer()
+    await _review(reviewer, effort=Effort.HIGH, consequential=False)
+    assert not reviewer.called
+
+
+async def test_that_max_effort_reviews_even_non_consequential_tool_calls() -> None:
+    reviewer = _SpyReviewer()
+    await _review(reviewer, effort=Effort.MAX, consequential=False)
+    assert reviewer.called
 
 
 class _RejectedToolsThenMessageReact:
@@ -259,6 +335,7 @@ async def test_that_tool_call_step_is_committed_before_tool_results_are_appended
     assert state.history[1].tool_results[0].content == {"ok": True}
     assert state.steps == [result]
 
+
 async def test_that_blocking_loop_emits_a_single_complete_message_event_without_chunks() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
@@ -325,6 +402,8 @@ async def test_that_max_engine_iterations_forces_a_final_message_with_tools_disa
 async def test_that_max_semantic_failures_force_a_final_message_with_tools_disabled() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "please charge it")])
     context.state = ResponseState(agent_effort=Effort.HIGH)
+    # The reviewer only runs (and can reject) when a consequential tool is called.
+    _offer_tool(context, _tool("charge_card", consequential=True))
 
     react = _RejectedToolsThenMessageReact()
     loop = _make_blocking_loop()

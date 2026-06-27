@@ -38,6 +38,7 @@ from parlant.core.nlp.react import (
     Usage,
 )
 from parlant.core.sessions import EventKind, EventSource
+from parlant.core.nlp.tokenization import ZeroEstimatingTokenizer
 from parlant.core.tracer import LocalTracer
 
 from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
@@ -55,6 +56,7 @@ def _make_streaming_loop() -> StreamingLoop:
         meter=cast(Any, None),
         optimization_policy=cast(Any, None),
         react=cast(Any, None),
+        tokenizer=ZeroEstimatingTokenizer(),
         tool_runner=cast(Any, None),
         reviewer=cast(Any, None),
         hooks=EngineHooks(),
@@ -299,9 +301,7 @@ async def test_that_streamed_tool_preamble_is_trimmed_to_one_sentence() -> None:
     )
 
 
-async def test_that_default_preamble_configuration_passes_pre_tool_text_through_untrimmed() -> (
-    None
-):
+async def test_that_default_preamble_configuration_passes_pre_tool_text_through_untrimmed() -> None:
     context = create_engine_context(conversation=[(EventSource.CUSTOMER, "hi")])
     context.state = ResponseState()
     loop = _make_streaming_loop()

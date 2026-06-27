@@ -691,10 +691,11 @@ class _ToolStepController:
             # Skip the review for minimal-effort agents
             return None
 
-        if effort < Effort.HIGH and not context.state.has_matched_high_criticality_guidelines:
-            # For non-high-effort agents, skip the review
-            # if no high-criticality guidelines were matched
-            return None
+        # Max-effort agents review every tool call. Below max effort, only review
+        # when at least one consequential tool was called.
+        if effort != Effort.MAX:
+            if not self._any_consequential_tool_called(context, tool_calls):
+                return None
 
         await context.session_event_emitter.emit_status_event(
             trace_id=context.tracer.trace_id,
@@ -714,6 +715,19 @@ class _ToolStepController:
             return adjusted_reasoning
 
         return None
+
+    def _any_consequential_tool_called(
+        self,
+        context: EngineContext,
+        tool_calls: Sequence[ToolCallPart],
+    ) -> bool:
+        # tool_call.name matches Tool.name (both are tool_ids_by_name keys), so the
+        # offered tool catalog gives us each call's consequential flag without a
+        # service round-trip.
+        consequential_by_name = {
+            tool.name: tool.consequential for tool in context.state.available_tools
+        }
+        return any(consequential_by_name.get(call.name, False) for call in tool_calls)
 
     async def run_tool_calls(
         self,
