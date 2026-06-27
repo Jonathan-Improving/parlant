@@ -987,7 +987,7 @@ class Tag:
 
     async def _create_relationship(
         self,
-        target: Guideline | Journey | Tag | AnyOf | AllOf,
+        target: Rule | Journey | Tag | AnyOf | AllOf,
         kind: RelationshipKind,
         group_id: str | None = None,
     ) -> Relationship:
@@ -997,7 +997,7 @@ class Tag:
 
         entity_source = RelationshipEntity(id=self.id, kind=RelationshipEntityKind.TAG_ALL)
 
-        if isinstance(target, Guideline):
+        if isinstance(target, Rule):
             entity_target = RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE)
         elif isinstance(target, AnyOf):
             entity_target = RelationshipEntity(
@@ -1029,29 +1029,29 @@ class Tag:
         )
 
     async def prioritize_over(
-        self, *targets: Guideline | Journey | Tag | AllOf
+        self, *targets: Rule | Journey | Tag | AllOf
     ) -> Sequence[Relationship]:
-        """Creates priority relationships with other guidelines, journeys, or tags."""
+        """Creates priority relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for prioritization.")
 
         return [await self._create_relationship(t, RelationshipKind.PRIORITY) for t in targets]
 
-    async def exclude(self, *targets: Guideline | Journey | Tag | AllOf) -> Sequence[Relationship]:
-        """Alias for prioritize_over. Creates priority relationships with other guidelines, journeys, or tags."""
+    async def exclude(self, *targets: Rule | Journey | Tag | AllOf) -> Sequence[Relationship]:
+        """Alias for prioritize_over. Creates priority relationships with other rules, journeys, or tags."""
         return await self.prioritize_over(*targets)
 
     async def depend_on(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
-        """Creates dependency relationships with other guidelines, journeys, or tags."""
+        """Creates dependency relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for dependency.")
 
         return [await self._create_relationship(t, RelationshipKind.DEPENDENCY) for t in targets]
 
     async def depend_on_any(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
         """Creates OR dependency relationships. At least one target must be active."""
         if not targets:
@@ -1154,8 +1154,8 @@ class GuidelineMatch:
 
 
 @dataclass
-class GuidelineMatchingContext:
-    """Context for custom guideline matchers, providing information about the current interaction."""
+class RuleMatchingContext:
+    """Context for custom rule matchers, providing information about the current interaction."""
 
     server: Server
     container: Container
@@ -1200,8 +1200,8 @@ class GuidelineMatchingContext:
         engine_ctx: EngineContext,
         server: Server,
         container: Container,
-    ) -> GuidelineMatchingContext:
-        """Build an SDK GuidelineMatchingContext from the engine-agnostic
+    ) -> RuleMatchingContext:
+        """Build an SDK RuleMatchingContext from the engine-agnostic
         EngineContext, so custom matchers run identically under any engine."""
         agent = await server.get_agent(id=engine_ctx.agent.id)
         customer = await server.get_customer(id=engine_ctx.customer.id)
@@ -1231,7 +1231,10 @@ class GuidelineMatchingContext:
         )
 
 
-async def _match_always(ctx: GuidelineMatchingContext, g: Guideline) -> GuidelineMatch:
+GuidelineMatchingContext = RuleMatchingContext
+
+
+async def _match_always(ctx: RuleMatchingContext, g: Rule) -> GuidelineMatch:
     return GuidelineMatch(
         id=g.id,
         matched=True,
@@ -1268,14 +1271,12 @@ class JourneyMatch:
 
 
 @dataclass(frozen=True)
-class Guideline:
-    """A guideline that defines a condition and an action to be taken."""
+class Rule:
+    """A base class for SDK objects backed by a guideline record."""
 
     MATCH_ALWAYS = _match_always
 
     id: GuidelineId
-    condition: str
-    action: str | None
     tags: Sequence[Tag]
     metadata: Mapping[str, JSONSerializable]
 
@@ -1283,22 +1284,24 @@ class Guideline:
     _container: Container
     _store_provider: StoreProvider
 
+    title: str | None = None
+    description: str | None = None
     labels: set[str] = field(default_factory=set)
     effort: Effort | None = None
     priority: int = 0
 
-    async def entail(self, guideline: Guideline) -> Relationship:
-        """Creates an entailment relationship with another guideline."""
+    async def entail(self, rule: Rule) -> Relationship:
+        """Creates an entailment relationship with another rule."""
         return await self._create_relationship(
-            target=guideline,
+            target=rule,
             kind=RelationshipKind.ENTAILMENT,
             direction="source",
         )
 
     async def prioritize_over(
-        self, *targets: Guideline | Journey | Tag | AllOf
+        self, *targets: Rule | Journey | Tag | AllOf
     ) -> Sequence[Relationship]:
-        """Creates priority relationships with other guidelines, journeys, or tags."""
+        """Creates priority relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for prioritization.")
 
@@ -1311,14 +1314,14 @@ class Guideline:
             for t in targets
         ]
 
-    async def exclude(self, *targets: Guideline | Journey | Tag | AllOf) -> Sequence[Relationship]:
-        """Alias for prioritize_over. Creates priority relationships with other guidelines, journeys, or tags."""
+    async def exclude(self, *targets: Rule | Journey | Tag | AllOf) -> Sequence[Relationship]:
+        """Alias for prioritize_over. Creates priority relationships with other rules, journeys, or tags."""
         return await self.prioritize_over(*targets)
 
     async def depend_on(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
-        """Creates dependency relationships with other guidelines, journeys, or tags."""
+        """Creates dependency relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for dependency.")
 
@@ -1332,7 +1335,7 @@ class Guideline:
         ]
 
     async def depend_on_any(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
         """Creates OR dependency relationships. At least one target must be active."""
         if not targets:
@@ -1351,14 +1354,14 @@ class Guideline:
 
     async def disambiguate(
         self,
-        targets: Sequence[Guideline | Journey],
+        targets: Sequence[Rule | Journey],
     ) -> Sequence[Relationship]:
         if len(targets) < 2:
             raise SDKError(
                 f"At least two targets are required for disambiguation (got {len(targets)})."
             )
 
-        guideline_targets = [t for t in targets if isinstance(t, Guideline)]
+        rule_targets = [t for t in targets if isinstance(t, Rule)]
         journey_triggers = list(
             chain.from_iterable([t.triggers for t in targets if isinstance(t, Journey)])
         )
@@ -1369,7 +1372,7 @@ class Guideline:
                 kind=RelationshipKind.DISAMBIGUATION,
                 direction="source",
             )
-            for t in guideline_targets + journey_triggers
+            for t in rule_targets + journey_triggers
         ]
 
     async def reevaluate_after(self, *tools: ToolRef) -> Sequence[Relationship]:
@@ -1422,12 +1425,12 @@ class Guideline:
 
     async def _create_relationship(
         self,
-        target: Guideline | Journey | Tag | AnyOf | AllOf,
+        target: Rule | Journey | Tag | AnyOf | AllOf,
         kind: RelationshipKind,
         direction: Literal["source", "target"],
         group_id: str | None = None,
     ) -> Relationship:
-        if isinstance(target, Guideline):
+        if isinstance(target, Rule):
             other_entity = RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE)
         elif isinstance(target, AnyOf):
             other_entity = RelationshipEntity(id=target.tag.id, kind=RelationshipEntityKind.TAG_ANY)
@@ -1464,6 +1467,30 @@ class Guideline:
             source=relationship.source.id,
             target=relationship.target.id,
         )
+
+
+@dataclass(frozen=True)
+class Guideline(Rule):
+    """A guideline that defines a condition and an action to be taken."""
+
+    condition: str = ""
+    action: str | None = None
+
+
+@dataclass(frozen=True)
+class Observation(Rule):
+    """An observation that identifies a contextual state."""
+
+    condition: str = ""
+
+
+@dataclass(frozen=True)
+class Policy(Rule):
+    """A policy that defines standing guidance."""
+
+    @property
+    def content(self) -> str | None:
+        return self.description
 
 
 TState = TypeVar("TState", bound="JourneyState")
@@ -2539,7 +2566,7 @@ class Journey:
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        matcher: Callable[[RuleMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -2550,33 +2577,36 @@ class Journey:
         title: str | None = None,
         track: bool = True,
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
         signals: Sequence[str] = [],
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
-        guideline = await self._server._create_guideline(
-            condition=condition,
-            action=action,
-            description=description,
-            title=title,
-            tools=tools,
-            metadata=metadata,
-            canned_responses=canned_responses,
-            criticality=criticality,
-            composition_mode=composition_mode,
-            effort=effort,
-            matcher=matcher,
-            on_selected=on_selected,
-            on_message=on_message,
-            canned_response_field_provider=canned_response_field_provider,
-            tags=[t.id for t in tags] if tags else None,
-            relationship_target_tag_id=_Tag.for_journey_id(self.id).id,
-            id=id,
-            track=track,
-            labels=labels,
-            priority=priority,
-            signals=signals,
+        guideline = cast(
+            Guideline,
+            await self._server._create_guideline(
+                condition=condition,
+                action=action,
+                description=description,
+                title=title,
+                tools=tools,
+                metadata=metadata,
+                canned_responses=canned_responses,
+                criticality=criticality,
+                composition_mode=composition_mode,
+                effort=effort,
+                matcher=matcher,
+                on_selected=on_selected,
+                on_message=on_message,
+                canned_response_field_provider=canned_response_field_provider,
+                tags=[t.id for t in tags] if tags else None,
+                relationship_target_tag_id=_Tag.for_journey_id(self.id).id,
+                id=id,
+                track=track,
+                labels=labels,
+                priority=priority,
+                signals=signals,
+            ),
         )
 
         if dependencies:
@@ -2592,7 +2622,7 @@ class Journey:
         canned_responses: Sequence[CannedResponseId] = [],
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        matcher: Callable[[RuleMatchingContext, Observation], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         canned_response_field_provider: Callable[[EngineContext], Awaitable[Mapping[str, Any]]]
@@ -2601,28 +2631,41 @@ class Journey:
         id: GuidelineId | None = None,
         title: str | None = None,
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
-    ) -> Guideline:
+    ) -> Observation:
         """A shorthand for creating an observational guideline with the specified condition."""
 
-        return await self.create_guideline(
-            condition=condition,
-            description=description,
-            id=id,
-            title=title,
-            tools=tools,
-            canned_responses=canned_responses,
-            composition_mode=composition_mode,
-            effort=effort,
-            matcher=matcher,
-            on_selected=on_selected,
-            canned_response_field_provider=canned_response_field_provider,
-            tags=tags,
-            labels=labels,
-            dependencies=dependencies,
-            priority=priority,
+        observation = cast(
+            Observation,
+            await self._server._create_guideline(
+                condition=condition,
+                action=None,
+                description=description,
+                title=title,
+                tools=tools,
+                metadata={},
+                canned_responses=canned_responses,
+                criticality=Criticality.MEDIUM,
+                composition_mode=composition_mode,
+                effort=effort,
+                matcher=matcher,
+                on_selected=on_selected,
+                on_message=None,
+                canned_response_field_provider=canned_response_field_provider,
+                tags=[t.id for t in tags] if tags else None,
+                relationship_target_tag_id=_Tag.for_journey_id(self.id).id,
+                id=id,
+                labels=labels,
+                priority=priority,
+                rule_kind="observation",
+            ),
         )
+
+        if dependencies:
+            await observation.depend_on(*dependencies)
+
+        return observation
 
     async def attach_tool(
         self,
@@ -2722,9 +2765,9 @@ class Journey:
         return canrep.id
 
     async def prioritize_over(
-        self, *targets: Guideline | Journey | Tag | AllOf
+        self, *targets: Rule | Journey | Tag | AllOf
     ) -> Sequence[Relationship]:
-        """Creates priority relationships with other guidelines, journeys, or tags."""
+        """Creates priority relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for prioritization.")
 
@@ -2737,14 +2780,14 @@ class Journey:
             for t in targets
         ]
 
-    async def exclude(self, *targets: Guideline | Journey | Tag | AllOf) -> Sequence[Relationship]:
-        """Alias for prioritize_over. Creates priority relationships with other guidelines, journeys, or tags."""
+    async def exclude(self, *targets: Rule | Journey | Tag | AllOf) -> Sequence[Relationship]:
+        """Alias for prioritize_over. Creates priority relationships with other rules, journeys, or tags."""
         return await self.prioritize_over(*targets)
 
     async def depend_on(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
-        """Creates dependency relationships with other guidelines, journeys, or tags."""
+        """Creates dependency relationships with other rules, journeys, or tags."""
         if not targets:
             raise SDKError("At least one target must be provided for dependency.")
 
@@ -2758,7 +2801,7 @@ class Journey:
         ]
 
     async def depend_on_any(
-        self, *targets: Guideline | Journey | Tag | AnyOf | AllOf
+        self, *targets: Rule | Journey | Tag | AnyOf | AllOf
     ) -> Sequence[Relationship]:
         """Creates OR dependency relationships. At least one target must be active."""
         if not targets:
@@ -2777,12 +2820,12 @@ class Journey:
 
     async def _create_relationship(
         self,
-        target: Guideline | Journey | Tag | AnyOf | AllOf,
+        target: Rule | Journey | Tag | AnyOf | AllOf,
         kind: RelationshipKind,
         direction: Literal["source", "target"],
         group_id: str | None = None,
     ) -> Relationship:
-        if isinstance(target, Guideline):
+        if isinstance(target, Rule):
             other_entity = RelationshipEntity(id=target.id, kind=RelationshipEntityKind.GUIDELINE)
         elif isinstance(target, AnyOf):
             other_entity = RelationshipEntity(id=target.tag.id, kind=RelationshipEntityKind.TAG_ANY)
@@ -3264,7 +3307,7 @@ class Agent:
         on_message: Callable[[EngineContext, JourneyMatch], Awaitable[None]] | None = None,
         tags: Sequence[Tag] = [],
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
     ) -> Journey:
         """Creates a new journey with the specified title, description, and triggers."""
@@ -3335,7 +3378,7 @@ class Agent:
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        matcher: Callable[[RuleMatchingContext, Policy], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -3345,40 +3388,44 @@ class Agent:
         id: GuidelineId | None = None,
         track: bool = True,
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
         signals: Sequence[str] = [],
-    ) -> Guideline:
-        """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
-        guideline = await self._server._create_guideline(
-            condition=None,
-            action=None,
-            description=content,
-            title=title,
-            tools=tools,
-            metadata=metadata,
-            canned_responses=canned_responses,
-            criticality=criticality,
-            composition_mode=composition_mode,
-            effort=effort,
-            matcher=matcher,
-            on_selected=on_selected,
-            on_message=on_message,
-            canned_response_field_provider=canned_response_field_provider,
-            tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
-            relationship_target_tag_id=None,
-            id=id,
-            track=track,
-            labels=labels,
-            priority=priority,
-            signals=signals,
-            agent_id=self.id,
+    ) -> Policy:
+        """Creates a policy with the specified title and content."""
+        policy = cast(
+            Policy,
+            await self._server._create_guideline(
+                condition=None,
+                action=None,
+                description=content,
+                title=title,
+                tools=tools,
+                metadata=metadata,
+                canned_responses=canned_responses,
+                criticality=criticality,
+                composition_mode=composition_mode,
+                effort=effort,
+                matcher=matcher,
+                on_selected=on_selected,
+                on_message=on_message,
+                canned_response_field_provider=canned_response_field_provider,
+                tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
+                relationship_target_tag_id=None,
+                id=id,
+                track=track,
+                labels=labels,
+                priority=priority,
+                signals=signals,
+                agent_id=self.id,
+                rule_kind="policy",
+            ),
         )
 
         if dependencies:
-            await guideline.depend_on(*dependencies)
+            await policy.depend_on(*dependencies)
 
-        return guideline
+        return policy
 
     async def create_guideline(
         self,
@@ -3391,7 +3438,7 @@ class Agent:
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        matcher: Callable[[RuleMatchingContext, Guideline], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
@@ -3402,34 +3449,37 @@ class Agent:
         title: str | None = None,
         track: bool = True,
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
         signals: Sequence[str] = [],
     ) -> Guideline:
         """Creates a guideline with the specified condition and action, as well as (optionally) tools to achieve its task."""
-        guideline = await self._server._create_guideline(
-            condition=condition,
-            action=action,
-            description=description,
-            title=title,
-            tools=tools,
-            metadata=metadata,
-            canned_responses=canned_responses,
-            criticality=criticality,
-            composition_mode=composition_mode,
-            effort=effort,
-            matcher=matcher,
-            on_selected=on_selected,
-            on_message=on_message,
-            canned_response_field_provider=canned_response_field_provider,
-            tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
-            relationship_target_tag_id=None,
-            id=id,
-            track=track,
-            labels=labels,
-            priority=priority,
-            signals=signals,
-            agent_id=self.id,
+        guideline = cast(
+            Guideline,
+            await self._server._create_guideline(
+                condition=condition,
+                action=action,
+                description=description,
+                title=title,
+                tools=tools,
+                metadata=metadata,
+                canned_responses=canned_responses,
+                criticality=criticality,
+                composition_mode=composition_mode,
+                effort=effort,
+                matcher=matcher,
+                on_selected=on_selected,
+                on_message=on_message,
+                canned_response_field_provider=canned_response_field_provider,
+                tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
+                relationship_target_tag_id=None,
+                id=id,
+                track=track,
+                labels=labels,
+                priority=priority,
+                signals=signals,
+                agent_id=self.id,
+            ),
         )
 
         if dependencies:
@@ -3446,7 +3496,7 @@ class Agent:
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]]
+        matcher: Callable[[RuleMatchingContext, Observation], Awaitable[GuidelineMatch]]
         | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         canned_response_field_provider: Callable[[EngineContext], Awaitable[Mapping[str, Any]]]
@@ -3455,29 +3505,42 @@ class Agent:
         id: GuidelineId | None = None,
         title: str | None = None,
         labels: Iterable[str] = (),
-        dependencies: Sequence[Guideline | Journey] = [],
+        dependencies: Sequence[Rule | Journey] = [],
         priority: int = 0,
-    ) -> Guideline:
+    ) -> Observation:
         """A shorthand for creating an observational guideline with the specified condition."""
 
-        return await self.create_guideline(
-            condition=condition,
-            description=description,
-            id=id,
-            title=title,
-            tools=tools,
-            canned_responses=canned_responses,
-            composition_mode=composition_mode,
-            effort=effort,
-            matcher=matcher,
-            on_selected=on_selected,
-            criticality=criticality,
-            canned_response_field_provider=canned_response_field_provider,
-            tags=tags,
-            labels=labels,
-            dependencies=dependencies,
-            priority=priority,
+        observation = cast(
+            Observation,
+            await self._server._create_guideline(
+                condition=condition,
+                action=None,
+                description=description,
+                title=title,
+                tools=tools,
+                metadata={},
+                canned_responses=canned_responses,
+                criticality=criticality,
+                composition_mode=composition_mode,
+                effort=effort,
+                matcher=matcher,
+                on_selected=on_selected,
+                on_message=None,
+                canned_response_field_provider=canned_response_field_provider,
+                tags=[_Tag.for_agent_id(self.id).id, *[t.id for t in tags]],
+                relationship_target_tag_id=None,
+                id=id,
+                labels=labels,
+                priority=priority,
+                agent_id=self.id,
+                rule_kind="observation",
+            ),
         )
+
+        if dependencies:
+            await observation.depend_on(*dependencies)
+
+        return observation
 
     async def attach_tool(
         self,
@@ -4372,7 +4435,7 @@ class Server:
         composition_mode: CompositionMode | None,
         effort: Effort | None,
         canned_responses: Sequence[CannedResponseId],
-        matcher: Callable[[GuidelineMatchingContext, Guideline], Awaitable[GuidelineMatch]] | None,
+        matcher: Callable[[RuleMatchingContext, Any], Awaitable[GuidelineMatch]] | None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None,
         on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None,
         canned_response_field_provider: Callable[[EngineContext], Awaitable[Mapping[str, Any]]]
@@ -4385,7 +4448,8 @@ class Server:
         priority: int = 0,
         signals: Sequence[str] = [],
         agent_id: AgentId | None = None,
-    ) -> Guideline:
+        rule_kind: Literal["guideline", "observation", "policy"] = "guideline",
+    ) -> Rule:
         """Internal method to create a guideline with common logic."""
         self._advance_creation_progress()
 
@@ -4458,34 +4522,49 @@ class Server:
                 tool_id=_tool_ref_to_id(t),
             )
 
-        result_guideline = Guideline(
-            id=guideline.id,
-            condition=condition or "",
-            action=action,
-            tags=_tags_from_ids(guideline.tags),
-            metadata=guideline.metadata,
-            labels=guideline.labels,
-            effort=guideline.effort,
-            priority=guideline.priority,
-            _server=self,
-            _container=self.container,
-            _store_provider=self._store_provider,
-        )
+        rule_common = {
+            "id": guideline.id,
+            "tags": _tags_from_ids(guideline.tags),
+            "metadata": guideline.metadata,
+            "title": guideline.title,
+            "description": guideline.content.description,
+            "labels": guideline.labels,
+            "effort": guideline.effort,
+            "priority": guideline.priority,
+            "_server": self,
+            "_container": self.container,
+            "_store_provider": self._store_provider,
+        }
+
+        match rule_kind:
+            case "guideline":
+                result_rule: Rule = Guideline(
+                    **rule_common,
+                    condition=guideline.content.condition,
+                    action=guideline.content.action,
+                )
+            case "observation":
+                result_rule = Observation(
+                    **rule_common,
+                    condition=guideline.content.condition,
+                )
+            case "policy":
+                result_rule = Policy(**rule_common)
 
         if matcher is not None:
             # Register the matcher in the engine-agnostic registry, wrapped in a
             # shim that translates between the (neutral) EngineContext and the
-            # SDK's GuidelineMatchingContext. Whichever engine runs consumes the
+            # SDK's RuleMatchingContext. Whichever engine runs consumes the
             # registry — the SDK doesn't depend on any engine's matching internals.
             async def shim_matcher(
                 engine_ctx: EngineContext, core_guideline: _Guideline
             ) -> _GuidelineMatch | None:
-                sdk_ctx = await GuidelineMatchingContext._from_engine_context(
+                sdk_ctx = await RuleMatchingContext._from_engine_context(
                     engine_ctx=engine_ctx,
                     server=self,
                     container=self.container,
                 )
-                result = await matcher(sdk_ctx, result_guideline)
+                result = await matcher(sdk_ctx, result_rule)
 
                 return (
                     _GuidelineMatch(
@@ -4528,7 +4607,7 @@ class Server:
                 )
                 engine_hooks.on_guideline_selected_handlers[guideline.id].append(shim)
 
-        return result_guideline
+        return result_rule
 
     async def _render_guideline(self, guideline_id: GuidelineId) -> str:
         guideline = await self._store_provider.get_store(
@@ -5894,7 +5973,6 @@ __all__ = [
     "FallbackSchematicGenerator",
     "Guideline",
     "GuidelineId",
-    "GuidelineMatchingContext",
     "Interaction",
     "InteractionMessage",
     "JSONSerializable",
@@ -5928,12 +6006,14 @@ __all__ = [
     "Operation",
     "OutputMode",
     "OptimizationPolicy",
+    "Observation",
     "PerceivedPerformancePolicy",
     "PerceivedPerformancePolicyProvider",
     "Plan",
     "Planner",
     "PlannerProvider",
     "PluginServer",
+    "Policy",
     "PreambleConfiguration",
     "ProductionAuthorizationPolicy",
     "PromptBuilder",
@@ -5948,6 +6028,8 @@ __all__ = [
     "RetrieverContext",
     "RetrieverFunction",
     "RetrieverResult",
+    "Rule",
+    "RuleMatchingContext",
     "SchematicGenerationResult",
     "SchematicGenerator",
     "SchematicGeneratorHints",

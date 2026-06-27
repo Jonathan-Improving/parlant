@@ -18,6 +18,7 @@ from typing import Any
 from parlant.core.capabilities import CapabilityStore
 from parlant.core.guideline_tool_associations import GuidelineToolAssociationStore
 from parlant.core.guidelines import GuidelineStore
+from parlant.core.relationships import RelationshipKind, RelationshipStore
 from parlant.core.services.tools.plugins import tool
 from parlant.core.tags import Tag
 from parlant.core.tools import ToolContext, ToolResult
@@ -99,6 +100,56 @@ class Test_that_an_agent_can_create_guideline(SDKTest):
         assert guideline.tags == [Tag.for_agent_id(self.agent.id).id]
         assert len(guideline.signals) == 5
         assert all(signal for signal in guideline.signals)
+
+
+class Test_that_an_agent_gets_specific_rule_objects_when_creating_rules(SDKTest):
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(
+            name="Rule Agent",
+            description="Agent for rule object tests",
+        )
+
+        self.observation = await self.agent.create_observation(
+            condition="The customer is discussing billing",
+            description="Billing is the active topic.",
+        )
+        self.guideline = await self.agent.create_guideline(
+            condition="The customer is discussing billing",
+            action="Ask for the invoice number.",
+        )
+        self.policy = await self.agent.create_policy(
+            title="Billing privacy",
+            content="Never reveal billing information without verification.",
+        )
+        self.relationships = await self.policy.depend_on(self.observation)
+
+    async def run(self, ctx: Context) -> None:
+        assert isinstance(self.observation, p.Rule)
+        assert isinstance(self.observation, p.Observation)
+        assert not isinstance(self.observation, p.Guideline)
+
+        assert isinstance(self.guideline, p.Rule)
+        assert isinstance(self.guideline, p.Guideline)
+
+        assert isinstance(self.policy, p.Rule)
+        assert isinstance(self.policy, p.Policy)
+        assert self.policy.content == "Never reveal billing information without verification."
+
+        guideline_store = ctx.container[GuidelineStore]
+
+        stored_observation = await guideline_store.read_guideline(self.observation.id)
+        assert stored_observation.content.condition == "The customer is discussing billing"
+        assert stored_observation.content.action is None
+
+        stored_policy = await guideline_store.read_guideline(self.policy.id)
+        assert stored_policy.title == "Billing privacy"
+        assert stored_policy.content.description == self.policy.content
+
+        relationship_store = ctx.container[RelationshipStore]
+        relationship = await relationship_store.read_relationship(self.relationships[0].id)
+        assert relationship.kind == RelationshipKind.DEPENDENCY
+        assert relationship.source.id == self.policy.id
+        assert relationship.target.id == self.observation.id
 
 
 class Test_that_an_agent_can_attach_tool(SDKTest):
