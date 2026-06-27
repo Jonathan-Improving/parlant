@@ -79,7 +79,7 @@ class Effort(Enum):
     def level(self) -> int:
         return _EFFORT_ORDER[self]
 
-    def __lt__(self, other: object):
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, Effort):
             return NotImplemented
 
