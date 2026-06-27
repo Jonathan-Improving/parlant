@@ -162,7 +162,8 @@ class Matcher:
         guidelines = [
             g
             for g in context.state.usable_guidelines
-            if g.criticality != Criticality.LOW and self._matcher_registry.get(g.id) is None
+            if (g.criticality != Criticality.LOW or self._check_if_raises_effort(context, g))
+            and self._matcher_registry.get(g.id) is None
         ]
 
         if not guidelines:
@@ -343,7 +344,18 @@ class Matcher:
                 # with data and/or actions, so we should at least rank - not use embeddings.
                 return _MatcherStrategy.RANK
 
+            if self._check_if_raises_effort(context, guideline):
+                # If a matching guideline would raise the turn's effort level, it must be
+                # matched into current-turn state rather than only recalled into the session.
+                return _MatcherStrategy.RANK
+
         return strategy
+
+    def _check_if_raises_effort(self, context: EngineContext, guideline: Guideline) -> bool:
+        return (
+            guideline.effort is not None
+            and guideline.effort > context.state.dynamic_effort_level
+        )
 
     async def _load_strategy_choice_signals(
         self,
@@ -404,8 +416,13 @@ class Matcher:
         matcher, regardless of strategy — an explicit matcher is authoritative. The
         rest are bucketed by `_get_strategy`.
         """
-        # Low-criticality guidelines are always included in the system instructions
-        guidelines = [g for g in guidelines if g.criticality != Criticality.LOW]
+        # Low-criticality guidelines are always included in the system instructions,
+        # unless they carry an effort override that can affect the current turn.
+        guidelines = [
+            g
+            for g in guidelines
+            if g.criticality != Criticality.LOW or self._check_if_raises_effort(context, g)
+        ]
 
         if not guidelines:
             return []

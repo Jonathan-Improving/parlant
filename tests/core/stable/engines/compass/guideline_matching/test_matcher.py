@@ -20,6 +20,16 @@ from parlant.core.agents import Effort
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
+from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+    GuidelineDistillationResult,
+)
+from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
+    GuidelineRankingResult,
+    RankedGuideline,
+)
+from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
+    GuidelineRecallResult,
+)
 from parlant.core.engines.compass.matcher import (
     Matcher,
     _ContextUsage,
@@ -55,6 +65,11 @@ class _FakeMatcherRegistry:
         return None
 
 
+class _FakeLogger:
+    def debug(self, *args, **kwargs):
+        pass
+
+
 def _make_warm_up_matcher() -> Matcher:
     matcher = object.__new__(Matcher)
     matcher._guideline_ranker = AsyncMock()
@@ -63,6 +78,20 @@ def _make_warm_up_matcher() -> Matcher:
     matcher._relationship_store = _FakeRelationshipStore()
     matcher._entity_queries = _FakeEntityQueries()
     matcher._entity_commands = _FakeEntityCommands()
+    return matcher
+
+
+def _make_batch_matcher() -> Matcher:
+    matcher = _make_warm_up_matcher()
+    matcher._logger = _FakeLogger()
+    matcher._guideline_function_matcher = AsyncMock()
+    matcher._guideline_function_matcher.match = AsyncMock(return_value=[])
+    matcher._guideline_recaller = AsyncMock()
+    matcher._guideline_recaller.recall = AsyncMock(return_value=GuidelineRecallResult([], 0.0))
+    matcher._guideline_distiller = AsyncMock()
+    matcher._guideline_distiller.distill = AsyncMock(
+        return_value=GuidelineDistillationResult([], None)
+    )
     return matcher
 
 
@@ -348,3 +377,53 @@ async def test_that_warm_up_skips_both_components_when_strategy_needs_neither() 
 
     matcher._guideline_ranker.warm_up.assert_not_awaited()
     matcher._guideline_distiller.warm_up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_that_warm_up_ranks_guideline_that_can_raise_effort() -> None:
+    matcher = _make_warm_up_matcher()
+    guideline = replace(
+        create_guideline(condition="customer asks for regulated help", action="follow the policy"),
+        effort=Effort.HIGH,
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.LOW)
+
+    await matcher.warm_up(context)
+
+    matcher._guideline_ranker.warm_up.assert_awaited_once_with(context)
+    matcher._guideline_distiller.warm_up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_that_low_criticality_guideline_that_can_raise_effort_is_matched_this_turn() -> None:
+    matcher = _make_batch_matcher()
+    guideline = replace(
+        create_guideline(condition="customer asks for regulated help", action="follow the policy"),
+        criticality=Criticality.LOW,
+        effort=Effort.HIGH,
+    )
+    matcher._guideline_ranker.rank = AsyncMock(
+        return_value=GuidelineRankingResult(
+            [
+                RankedGuideline(
+                    guideline=guideline,
+                    reasoning="Relevant.",
+                    is_relevant=True,
+                    score=1.0,
+                )
+            ],
+            None,
+        )
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.LOW)
+
+    matches = await matcher._run_batches(context, [guideline])
+
+    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [])
+    matcher._guideline_ranker.rank.assert_awaited_once_with(context, [guideline])
+    assert matches == [
+        (
+            GuidelineMatch(guideline=guideline, rationale="Relevant."),
+            _ContextUsage.MATCH_CURRENT_TURN,
+        )
+    ]

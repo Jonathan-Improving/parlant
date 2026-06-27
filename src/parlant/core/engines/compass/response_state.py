@@ -31,15 +31,6 @@ from parlant.core.common import Criticality
 from parlant.core.tools import Tool, ToolId
 
 
-_EFFORT_ORDER: dict[Effort, int] = {
-    Effort.MIN: 0,
-    Effort.LOW: 1,
-    Effort.MEDIUM: 2,
-    Effort.HIGH: 3,
-    Effort.MAX: 4,
-}
-
-
 @dataclass(frozen=True)
 class IterationState:
     """State of a single iteration in the response process"""
@@ -138,7 +129,7 @@ class ResponseState:
             ),
         ]
 
-        return max(efforts, key=lambda effort: _EFFORT_ORDER[effort])
+        return max(efforts)
 
     @cached_property
     def has_matched_high_criticality_guidelines(self) -> bool:

@@ -26,6 +26,11 @@ from tests.core.stable.engines.compass.guideline_matching.utils import (
 )
 
 
+def test_that_effort_values_are_ordered_by_processing_depth() -> None:
+    assert Effort.MIN < Effort.LOW < Effort.MEDIUM < Effort.HIGH < Effort.MAX
+    assert max([Effort.LOW, Effort.HIGH, Effort.MEDIUM]) == Effort.HIGH
+
+
 def test_that_dynamic_effort_is_agent_effort_when_no_matched_guideline_has_effort() -> None:
     context = create_engine_context(
         conversation=[],

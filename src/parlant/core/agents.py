@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import total_ordering
 from itertools import chain
 from typing import NewType, Optional, Sequence, cast
 from typing_extensions import override, TypedDict, Self
@@ -64,6 +65,7 @@ class MessageOutputMode(Enum):
     """Message is streamed token by token."""
 
 
+@total_ordering
 class Effort(Enum):
     """Defines how much effort the agent invests in processing."""
 
@@ -72,6 +74,25 @@ class Effort(Enum):
     MEDIUM = "medium"
     HIGH = "high"
     MAX = "max"
+
+    @property
+    def level(self) -> int:
+        return _EFFORT_ORDER[self]
+
+    def __lt__(self, other: object):
+        if not isinstance(other, Effort):
+            return NotImplemented
+
+        return self.level < other.level
+
+
+_EFFORT_ORDER: dict[Effort, int] = {
+    Effort.MIN: 0,
+    Effort.LOW: 1,
+    Effort.MEDIUM: 2,
+    Effort.HIGH: 3,
+    Effort.MAX: 4,
+}
 
 
 class AgentUpdateParams(TypedDict, total=False):
