@@ -1231,9 +1231,6 @@ class RuleMatchingContext:
         )
 
 
-GuidelineMatchingContext = RuleMatchingContext
-
-
 async def _match_always(ctx: RuleMatchingContext, g: Rule) -> GuidelineMatch:
     return GuidelineMatch(
         id=g.id,
@@ -3378,8 +3375,7 @@ class Agent:
         criticality: Criticality = Criticality.MEDIUM,
         composition_mode: CompositionMode | None = None,
         effort: Effort | None = None,
-        matcher: Callable[[RuleMatchingContext, Policy], Awaitable[GuidelineMatch]]
-        | None = None,
+        matcher: Callable[[RuleMatchingContext, Policy], Awaitable[GuidelineMatch]] | None = None,
         on_selected: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         on_message: Callable[[EngineContext, GuidelineMatch], Awaitable[None]] | None = None,
         canned_response_field_provider: Callable[[EngineContext], Awaitable[Mapping[str, Any]]]
