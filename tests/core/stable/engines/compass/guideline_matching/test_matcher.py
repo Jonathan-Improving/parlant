@@ -21,6 +21,7 @@ from parlant.core.common import Criticality
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+    DistilledGuideline,
     GuidelineDistillationResult,
 )
 from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
@@ -29,6 +30,7 @@ from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
 )
 from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
     GuidelineRecallResult,
+    RecalledGuideline,
 )
 from parlant.core.engines.compass.matcher import (
     Matcher,
@@ -419,11 +421,194 @@ async def test_that_low_criticality_guideline_that_can_raise_effort_is_matched_t
 
     matches = await matcher._run_batches(context, [guideline])
 
-    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [])
+    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [guideline])
     matcher._guideline_ranker.rank.assert_awaited_once_with(context, [guideline])
     assert matches == [
         (
             GuidelineMatch(guideline=guideline, rationale="Relevant."),
+            _ContextUsage.MATCH_CURRENT_TURN,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_that_ranked_guideline_can_still_be_discovered_into_session_by_recall() -> None:
+    matcher = _make_batch_matcher()
+    guideline = replace(
+        create_guideline(condition="customer asks for regulated help", action="follow the policy"),
+        criticality=Criticality.HIGH,
+    )
+    matcher._guideline_recaller.recall = AsyncMock(
+        return_value=GuidelineRecallResult(
+            [RecalledGuideline(guideline=guideline, is_relevant=True, score=0.7)],
+            0.0,
+        )
+    )
+    matcher._guideline_ranker.rank = AsyncMock(
+        return_value=GuidelineRankingResult(
+            [
+                RankedGuideline(
+                    guideline=guideline,
+                    reasoning="Not currently relevant.",
+                    is_relevant=False,
+                    score=0.2,
+                )
+            ],
+            None,
+        )
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+
+    matches = await matcher._run_batches(context, [guideline])
+
+    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [guideline])
+    matcher._guideline_ranker.rank.assert_awaited_once_with(context, [guideline])
+    assert matches == [
+        (
+            GuidelineMatch(
+                guideline=guideline,
+                rationale="This may or may not be relevant right now - use your judgment.",
+            ),
+            _ContextUsage.INCLUDE_IN_SESSION,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_that_distilled_guideline_can_still_be_discovered_into_session_by_recall() -> None:
+    matcher = _make_batch_matcher()
+    guideline = replace(
+        create_guideline(
+            condition="customer asks for a regulated workflow",
+            action="follow the detailed workflow exactly",
+            description="This workflow has many details. " * 20,
+        ),
+        criticality=Criticality.HIGH,
+    )
+    matcher._guideline_recaller.recall = AsyncMock(
+        return_value=GuidelineRecallResult(
+            [RecalledGuideline(guideline=guideline, is_relevant=True, score=0.7)],
+            0.0,
+        )
+    )
+    matcher._guideline_distiller.distill = AsyncMock(
+        return_value=GuidelineDistillationResult(
+            [
+                DistilledGuideline(
+                    guideline=guideline,
+                    reasoning="No next-step action remains.",
+                    is_relevant=False,
+                    distilled_action=None,
+                )
+            ],
+            None,
+        )
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+
+    matches = await matcher._run_batches(context, [guideline])
+
+    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [guideline])
+    matcher._guideline_distiller.distill.assert_awaited_once_with(context, [guideline])
+    assert matches == [
+        (
+            GuidelineMatch(
+                guideline=guideline,
+                rationale="This may or may not be relevant right now - use your judgment.",
+            ),
+            _ContextUsage.INCLUDE_IN_SESSION,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_that_turn_match_takes_precedence_over_session_recall_discovery() -> None:
+    matcher = _make_batch_matcher()
+    guideline = replace(
+        create_guideline(condition="customer asks for regulated help", action="follow the policy"),
+        criticality=Criticality.HIGH,
+    )
+    matcher._guideline_recaller.recall = AsyncMock(
+        return_value=GuidelineRecallResult(
+            [RecalledGuideline(guideline=guideline, is_relevant=True, score=0.7)],
+            0.0,
+        )
+    )
+    matcher._guideline_ranker.rank = AsyncMock(
+        return_value=GuidelineRankingResult(
+            [
+                RankedGuideline(
+                    guideline=guideline,
+                    reasoning="Relevant.",
+                    is_relevant=True,
+                    score=1.0,
+                )
+            ],
+            None,
+        )
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+
+    matches = await matcher._run_batches(context, [guideline])
+
+    assert matches == [
+        (
+            GuidelineMatch(guideline=guideline, rationale="Relevant."),
+            _ContextUsage.MATCH_CURRENT_TURN,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_that_distilled_turn_match_takes_precedence_over_session_recall_discovery() -> None:
+    matcher = _make_batch_matcher()
+    guideline = replace(
+        create_guideline(
+            condition="customer asks for a regulated workflow",
+            action="follow the detailed workflow exactly",
+            description="This workflow has many details. " * 20,
+        ),
+        criticality=Criticality.HIGH,
+    )
+    matcher._guideline_recaller.recall = AsyncMock(
+        return_value=GuidelineRecallResult(
+            [RecalledGuideline(guideline=guideline, is_relevant=True, score=0.7)],
+            0.0,
+        )
+    )
+    matcher._guideline_distiller.distill = AsyncMock(
+        return_value=GuidelineDistillationResult(
+            [
+                DistilledGuideline(
+                    guideline=guideline,
+                    reasoning="Relevant.",
+                    is_relevant=True,
+                    distilled_action="Follow the detailed workflow exactly.",
+                )
+            ],
+            None,
+        )
+    )
+    context = _context_with_guidelines(guideline, effort=Effort.MEDIUM)
+
+    matches = await matcher._run_batches(context, [guideline])
+
+    matcher._guideline_recaller.recall.assert_awaited_once_with(context, [guideline])
+    matcher._guideline_distiller.distill.assert_awaited_once_with(context, [guideline])
+    assert matches == [
+        (
+            GuidelineMatch(
+                guideline=guideline,
+                rationale="Relevant.",
+                metadata={
+                    "distilled_action": (
+                        f'According to policy "{guideline.title or "Untitled policy"}", '
+                        "Follow the detailed workflow exactly.\n"
+                        "Apply this only insofar as it remains compatible with the other active "
+                        "policies and system instructions."
+                    )
+                },
+            ),
             _ContextUsage.MATCH_CURRENT_TURN,
         )
     ]

@@ -448,8 +448,12 @@ class Matcher:
                     if guideline not in context.state.session_guidelines:
                         recall_batch.append(guideline)
                 case _MatcherStrategy.RANK:
+                    if guideline not in context.state.session_guidelines:
+                        recall_batch.append(guideline)
                     rank_batch.append(guideline)
                 case _MatcherStrategy.DISTILL:
+                    if guideline not in context.state.session_guidelines:
+                        recall_batch.append(guideline)
                     distill_batch.append(guideline)
 
         code_matches, recalled, ranked, distilled = await safe_gather(
@@ -541,18 +545,6 @@ class Matcher:
         matches += [
             (
                 GuidelineMatch(
-                    guideline=rc.guideline,
-                    rationale="This may or may not be relevant right now - use your judgment.",
-                ),
-                _ContextUsage.INCLUDE_IN_SESSION,
-            )
-            for rc in recalled.recalled_guidelines
-            if rc.is_relevant
-        ]
-
-        matches += [
-            (
-                GuidelineMatch(
                     guideline=rk.guideline,
                     rationale=rk.reasoning
                     or "This may or may not be relevant right now - use your judgment.",
@@ -580,6 +572,24 @@ class Matcher:
             )
             for dg in distilled.distilled_guidelines
             if dg.is_relevant
+        ]
+
+        turn_matched_guideline_ids = {
+            match.guideline.id
+            for match, context_usage in matches
+            if context_usage == _ContextUsage.MATCH_CURRENT_TURN
+        }
+
+        matches += [
+            (
+                GuidelineMatch(
+                    guideline=rc.guideline,
+                    rationale="This may or may not be relevant right now - use your judgment.",
+                ),
+                _ContextUsage.INCLUDE_IN_SESSION,
+            )
+            for rc in recalled.recalled_guidelines
+            if rc.is_relevant and rc.guideline.id not in turn_matched_guideline_ids
         ]
 
         return matches
