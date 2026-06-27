@@ -61,7 +61,7 @@ class GuidelineDistillationResult:
 
 
 class HighEffortGuidelineDistillationSchema(DefaultBaseModel):
-    reasoning: str
+    tldr: str
     is_relevant: bool
     distilled_action: Optional[str] = None
 
@@ -168,7 +168,7 @@ class GuidelineDistiller:
             return (
                 DistilledGuideline(
                     guideline=guideline,
-                    reasoning=high_effort_inference.content.reasoning,
+                    reasoning=high_effort_inference.content.tldr,
                     is_relevant=high_effort_inference.content.is_relevant,
                     distilled_action=high_effort_inference.content.distilled_action,
                 ),
@@ -304,12 +304,14 @@ class GuidelineDistiller:
 
         formatted_shot += f"""
 - **Guideline**:
-{_format_guideline(
-            shot.title,
-            shot.guideline.condition,
-            shot.guideline.action,
-            shot.guideline.description,
-        )}
+{
+            _format_guideline(
+                shot.title,
+                shot.guideline.condition,
+                shot.guideline.action,
+                shot.guideline.description,
+            )
+        }
 
 """
 
@@ -340,6 +342,7 @@ class GuidelineDistiller:
     def _applicability_output_instruction(self, high_effort: bool) -> str:
         if high_effort:
             return """\
+In the "tldr" field, provide a very brief explanation of whether the guideline currently applies and, if so, which of its guidance is relevant to the next agent response.
 Record your applicability decision in the "is_relevant" field. "is_relevant" means this guideline contributes an actual instruction to the next response, so decide as follows:
 - If the guideline's condition does not apply, set "is_relevant" to false.
 - If the condition applies but there is genuinely nothing left to do right now - for example its action was already fully carried out earlier and has not arisen again for a new reason - also set "is_relevant" to false. There is no "relevant but nothing to do" state: if the guideline has nothing to contribute to the next response, it is not relevant.
@@ -590,8 +593,8 @@ OUTPUT FORMAT
             )
 
         result: dict[str, JSONSerializable] = {
-            "reasoning": (
-                "<A brief explanation of whether the guideline currently applies and, "
+            "tldr": (
+                "<A very brief explanation of whether the guideline currently applies and, "
                 "if so, which of its guidance is relevant to the next agent response>"
             ),
             "is_relevant": (
@@ -751,7 +754,7 @@ example_1_guideline = GuidelineContent(
 )
 
 example_1_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer wants to book a flight and has already provided the source and "
         "destination airports, so the journey is in progress. The next step in the action "
         "is to ask for the departure and return dates."
@@ -787,7 +790,7 @@ example_2_guideline = GuidelineContent(
 )
 
 example_2_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer is asking about visas and travel documents, not about booking flights "
         "or accommodation, so the condition does not apply to the current state of the "
         "conversation."
@@ -812,7 +815,7 @@ example_3_guideline = GuidelineContent(
 )
 
 example_3_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer is asking about the value of the S&P 500, so the guideline applies. "
         "Its action is a single concrete instruction, so it should be taken as is."
     ),
@@ -846,7 +849,7 @@ example_4_guideline = GuidelineContent(
 )
 
 example_4_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer is still asking for account-related help, but they already provided "
         "their account ID earlier and it remains valid for this request, so the action has "
         "already been carried out and there is no new reason to ask for it again. Nothing "
@@ -884,7 +887,7 @@ example_5_guideline = GuidelineContent(
 )
 
 example_5_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer raised a new trip — a winter trip to Europe — so the condition arose "
         "again for a new reason and the action should be reapplied. Their preferred "
         "activities for this new trip aren't known yet, so the next step is to ask about "
@@ -922,7 +925,7 @@ example_6_guideline = GuidelineContent(
 )
 
 example_6_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer changed the date, returning to an earlier step of the action. The home "
         "address they already gave is still valid, so there's no need to ask for it again. The "
         "next step that still needs doing is asking how many rooms need cleaning."
@@ -956,7 +959,7 @@ example_7_guideline = GuidelineContent(
 )
 
 example_7_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer wants to downgrade and asks whether they can switch again later this "
         "month, so the guideline applies. The downgrade-timing rule and the once-per-cycle "
         "rule both bear on this request; the upgrade rule does not. Both relevant rules "
@@ -993,7 +996,7 @@ example_8_guideline = GuidelineContent(
 )
 
 example_8_expected = HighEffortGuidelineDistillationSchema(
-    reasoning=(
+    tldr=(
         "The customer wants to book catering for 8 guests, so the deposit rule applies. The "
         "deposit is $25 per guest, which for 8 guests is $200 - that amount must be stated, "
         "not abstracted away. The cancellation rule isn't raised yet, so it's left out."
