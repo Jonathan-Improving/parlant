@@ -691,9 +691,7 @@ class _ToolStepController:
             # Skip the review for minimal-effort agents
             return None
 
-        if (effort in (Effort.LOW, Effort.MEDIUM)) and (
-            not context.state.has_matched_high_criticality_guidelines
-        ):
+        if effort < Effort.HIGH and not context.state.has_matched_high_criticality_guidelines:
             # For non-high-effort agents, skip the review
             # if no high-criticality guidelines were matched
             return None

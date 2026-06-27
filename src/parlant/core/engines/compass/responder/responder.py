@@ -74,7 +74,7 @@ class Responder:
     ) -> Callable[[EngineContext], Awaitable[str]] | None:
         effort = context.state.dynamic_effort_level
 
-        if effort in (Effort.MIN, Effort.LOW):
+        if effort <= Effort.LOW:
             return None  # No per-step instructions for low effort agents
 
         cached_instructions: str | None = None
@@ -84,7 +84,7 @@ class Responder:
 
             current_effort = ctx.state.dynamic_effort_level
 
-            if current_effort not in (Effort.HIGH, Effort.MAX):
+            if current_effort < Effort.HIGH:
                 # For medium effort agents, cache the instructions after the first build,
                 # so we don't rebuild them for every step.
                 if cached_instructions is not None:

@@ -199,7 +199,7 @@ class GuidelineDistiller:
             )
 
     def _should_use_high_effort_schema(self, context: EngineContext) -> bool:
-        return context.state.dynamic_effort_level in (Effort.HIGH, Effort.MAX)
+        return context.state.dynamic_effort_level >= Effort.HIGH
 
     def _cache_key(self, context: EngineContext) -> str:
         # Namespace the provider cache per session AND component, so components

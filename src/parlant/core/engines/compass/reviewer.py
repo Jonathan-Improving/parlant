@@ -84,7 +84,7 @@ class Reviewer:
         effort = context.state.dynamic_effort_level
 
         with self._tracer.span("tools.review"):
-            if effort in (Effort.HIGH, Effort.MAX):
+            if effort >= Effort.HIGH:
                 result, is_constructive = await self._review_tool_calls_with_high_effort_schema(
                     context,
                     reasoning,
