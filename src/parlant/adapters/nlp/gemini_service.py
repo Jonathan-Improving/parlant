@@ -1606,13 +1606,16 @@ Please set GEMINI_API_KEY in your environment before running Parlant.
         if t in (
             GuidelineRankSchema,
             LowEffortGuidelineDistillationSchema,
-            HighEffortGuidelineDistillationSchema,
         ):
             return Gemini_3_1_Flash_Lite[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
 
-        if t in (LowEffortReviewSchema, HighEffortReviewSchema):
+        if t in (
+            LowEffortReviewSchema,
+            HighEffortReviewSchema,
+            HighEffortGuidelineDistillationSchema,
+        ):
             return Gemini_3_5_Flash[t](  # type: ignore
                 self.logger, self._tracer, self._meter, self._health_reporter
             )
