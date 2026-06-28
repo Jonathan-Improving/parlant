@@ -28,7 +28,7 @@ from parlant.core.engines.alpha.prompt_builder import (
     SectionStatus,
 )
 from parlant.core.engines.alpha.tool_calling.common import get_tool_spec
-from parlant.core.engines.compass.guideline_matching.common import (
+from parlant.core.engines.compass.matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )

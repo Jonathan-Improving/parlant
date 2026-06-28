@@ -41,7 +41,7 @@ from parlant.core.sessions import EventKind, EventSource
 from parlant.core.nlp.tokenization import ZeroEstimatingTokenizer
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
+from tests.core.stable.engines.compass.matching.utils import create_engine_context
 
 
 def _make_streaming_loop() -> StreamingLoop:

@@ -18,10 +18,10 @@ from lagom import Container
 from pytest import fixture
 
 from parlant.core.common import JSONSerializable
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRanker
 from parlant.core.sessions import EventSource
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     base_test_that_guidelines_are_ranked_correctly,
     create_capability,
     create_context_variable,

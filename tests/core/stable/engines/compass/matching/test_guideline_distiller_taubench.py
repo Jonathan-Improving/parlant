@@ -36,7 +36,7 @@ from pytest import fixture
 
 from parlant.core.common import JSONSerializable
 from parlant.core.emissions import EmittedEvent
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
+from parlant.core.engines.compass.matching.guideline_distiller import GuidelineDistiller
 from parlant.core.glossary import Term
 from parlant.core.sessions import EventSource
 from parlant.core.tools import (
@@ -47,10 +47,10 @@ from parlant.core.tools import (
     ToolParameterOptions,
 )
 
-from tests.core.stable.engines.compass.guideline_matching.test_guideline_distiller import (
+from tests.core.stable.engines.compass.matching.test_guideline_distiller import (
     base_test_that_a_guideline_is_distilled_correctly,
 )
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_staged_tool_event,
     create_term,
 )

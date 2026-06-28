@@ -20,15 +20,15 @@ from parlant.core.agents import Effort
 from parlant.core.common import Criticality
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     DistilledGuideline,
     GuidelineDistillationResult,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
+from parlant.core.engines.compass.matching.guideline_ranker import (
     GuidelineRankingResult,
     RankedGuideline,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
+from parlant.core.engines.compass.matching.guideline_recaller import (
     GuidelineRecallResult,
     RecalledGuideline,
 )
@@ -40,7 +40,7 @@ from parlant.core.engines.compass.matcher import (
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.sessions import EventSource
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_engine_context,
     create_guideline,
     create_term,

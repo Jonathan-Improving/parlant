@@ -39,11 +39,11 @@ from parlant.core.common import DefaultBaseModel
 from parlant.adapters.nlp.common import record_llm_metrics
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.engines.compass.compacter import CompactionSchema
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.reviewer import HighEffortReviewSchema, LowEffortReviewSchema
 from parlant.core.meter import Meter
 from parlant.core.nlp.policies import policy, retry

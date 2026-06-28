@@ -35,7 +35,7 @@ from parlant.core.customers import Customer, CustomerId
 from parlant.core.emission.event_buffer import EventBuffer
 from parlant.core.emissions import EmittedEvent
 from parlant.core.engines.engine_context import EngineContext, Interaction
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRanker
 from parlant.core.engines.compass.response_state import ResponseState
 from parlant.core.engines.types import Context
 from parlant.core.glossary import Term, TermId

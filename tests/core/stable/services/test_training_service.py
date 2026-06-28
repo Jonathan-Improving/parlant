@@ -99,7 +99,7 @@ async def _wait_until_settled(service: TrainingService, job_id: UniqueId) -> Non
 async def test_that_a_training_task_trains_every_agent_in_its_own_space(
     container: Container,
 ) -> None:
-    from tests.core.stable.engines.compass.guideline_matching.utils import (
+    from tests.core.stable.engines.compass.matching.utils import (
         create_agent,
         create_guideline,
     )
@@ -131,7 +131,7 @@ async def test_that_a_training_task_trains_every_agent_in_its_own_space(
 async def test_that_a_scoped_training_task_trains_only_the_named_agents(
     container: Container,
 ) -> None:
-    from tests.core.stable.engines.compass.guideline_matching.utils import (
+    from tests.core.stable.engines.compass.matching.utils import (
         create_agent,
         create_guideline,
     )
@@ -158,7 +158,7 @@ async def test_that_a_scoped_training_task_trains_only_the_named_agents(
 
 
 async def test_that_train_agent_trains_a_single_agent(container: Container) -> None:
-    from tests.core.stable.engines.compass.guideline_matching.utils import (
+    from tests.core.stable.engines.compass.matching.utils import (
         create_agent,
         create_guideline,
     )
@@ -178,7 +178,7 @@ async def test_that_train_agent_trains_a_single_agent(container: Container) -> N
 async def test_that_creating_a_training_task_for_an_unknown_agent_is_rejected(
     container: Container,
 ) -> None:
-    from tests.core.stable.engines.compass.guideline_matching.utils import create_agent
+    from tests.core.stable.engines.compass.matching.utils import create_agent
 
     agent = create_agent()
     recaller = _FakeRecaller()
@@ -194,7 +194,7 @@ async def test_that_creating_a_training_task_for_an_unknown_agent_is_rejected(
 
 
 async def test_that_a_failed_training_task_is_marked_failed(container: Container) -> None:
-    from tests.core.stable.engines.compass.guideline_matching.utils import (
+    from tests.core.stable.engines.compass.matching.utils import (
         create_agent,
         create_guideline,
     )

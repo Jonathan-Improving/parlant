@@ -43,7 +43,7 @@ from parlant.adapters.nlp.openai_service import (
     OpenAIReactGenerator,
     OpenAIService,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.health import HealthReporter
 from parlant.core.loggers import Logger, StdoutLogger
 from parlant.core.meter import Meter

@@ -99,10 +99,10 @@ from parlant.core.engines.alpha.guideline_matching.generic.guideline_actionable_
     GenericActionableGuidelineMatching,
     GenericActionableGuidelineGuidelineMatchingShot,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
+from parlant.core.engines.compass.matching.guideline_ranker import (
     GuidelineRankSchema,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )

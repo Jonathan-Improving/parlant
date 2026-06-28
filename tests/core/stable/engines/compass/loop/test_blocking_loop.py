@@ -51,7 +51,7 @@ from parlant.core.tools import Tool, ToolId, ToolOverlap, ToolResult
 from parlant.core.nlp.tokenization import ZeroEstimatingTokenizer
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_agent,
     create_engine_context,
 )

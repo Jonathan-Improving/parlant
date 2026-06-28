@@ -17,7 +17,7 @@ from typing import Any, Sequence, cast
 from lagom import Container
 from pytest import fixture
 
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import (
+from parlant.core.engines.compass.matching.guideline_ranker import (
     GuidelineRanker,
     _format_guideline,
 )
@@ -27,7 +27,7 @@ from parlant.core.loggers import StdoutLogger
 from parlant.core.sessions import EventSource
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     base_test_that_guidelines_are_ranked_correctly,
     create_engine_context,
     create_guideline,

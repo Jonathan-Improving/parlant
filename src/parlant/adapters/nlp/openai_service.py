@@ -50,11 +50,11 @@ from parlant.core.engines.alpha.guideline_matching.generic.journey.journey_next_
     JourneyNextStepSelectionSchema,
 )
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.reviewer import HighEffortReviewSchema, LowEffortReviewSchema
 from parlant.core.engines.alpha.tool_calling.single_tool_batch import (
     NonConsequentialToolBatchSchema,

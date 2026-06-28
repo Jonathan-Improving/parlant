@@ -21,7 +21,7 @@ from lagom import Container
 from pytest import fixture
 
 from parlant.core.agents import Effort
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     GuidelineDistiller,
     LowEffortGuidelineDistillationSchema,
     _format_guideline,
@@ -41,7 +41,7 @@ from parlant.core.sessions import EventSource
 from parlant.core.tools import Tool, ToolId, ToolOverlap
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_agent,
     create_context_variable,
     create_customer,

@@ -21,7 +21,7 @@ import numpy as np
 from lagom import Container
 from pytest import fixture
 
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import (
+from parlant.core.engines.compass.matching.guideline_recaller import (
     GuidelineRecaller,
     _LogisticModel,
 )
@@ -35,7 +35,7 @@ from parlant.core.sessions import EventSource
 
 from parlant.core.agents import Agent
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_agent,
     create_engine_context,
     create_guideline,

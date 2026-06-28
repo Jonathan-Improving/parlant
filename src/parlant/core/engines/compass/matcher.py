@@ -26,12 +26,12 @@ from parlant.core.async_utils import safe_gather
 from parlant.core.common import Criticality, JSONSerializable
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.guideline_matcher_registry import GuidelineMatcherRegistry
-from parlant.core.engines.compass.guideline_matching.guideline_function_matcher import (
+from parlant.core.engines.compass.matching.guideline_function_matcher import (
     GuidelineFunctionMatcher,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import GuidelineDistiller
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRanker
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.matching.guideline_distiller import GuidelineDistiller
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRanker
+from parlant.core.engines.compass.matching.guideline_recaller import GuidelineRecaller
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.entity_cq import EntityCommands, EntityQueries

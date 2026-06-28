@@ -233,9 +233,9 @@ from parlant.core.glossary import GlossaryStore, GlossaryVectorStore
 from parlant.core.engines.alpha.engine import AlphaEngine
 from parlant.core.engines.compass.compacter import CompactionSchema
 from parlant.core.engines.compass.engine import CompassEngine
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )

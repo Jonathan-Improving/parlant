@@ -47,7 +47,7 @@ from parlant.core.tracer import LocalTracer
 from parlant.core.loggers import StdoutLogger
 
 from tests.core.common.utils import create_event_message
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_agent,
     create_engine_context,
     create_guideline,

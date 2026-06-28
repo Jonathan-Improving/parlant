@@ -17,7 +17,7 @@ from pytest import raises
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.engine_context import EngineContext
 from parlant.core.engines.guideline_matcher_registry import GuidelineMatcherRegistry
-from parlant.core.engines.compass.guideline_matching.guideline_function_matcher import (
+from parlant.core.engines.compass.matching.guideline_function_matcher import (
     GuidelineFunctionMatcher,
 )
 from parlant.core.engines.compass.response_state import ResponseState
@@ -26,7 +26,7 @@ from parlant.core.loggers import StdoutLogger
 from parlant.core.sessions import EventSource
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import (
+from tests.core.stable.engines.compass.matching.utils import (
     create_engine_context,
     create_guideline,
 )

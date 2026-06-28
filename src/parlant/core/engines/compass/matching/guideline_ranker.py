@@ -26,7 +26,7 @@ from parlant.core.engines.alpha.prompt_builder import (
     PromptBuilder,
     SectionStatus,
 )
-from parlant.core.engines.compass.guideline_matching.common import (
+from parlant.core.engines.compass.matching.common import (
     add_agent_reasoning,
     aggregate_generation_info,
 )

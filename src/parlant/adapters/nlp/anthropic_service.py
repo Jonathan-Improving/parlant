@@ -35,11 +35,11 @@ from parlant.adapters.nlp.common import normalize_json_output, record_llm_metric
 from parlant.adapters.nlp.hugging_face import JinaAIEmbedder
 
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
-from parlant.core.engines.compass.guideline_matching.guideline_distiller import (
+from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
-from parlant.core.engines.compass.guideline_matching.guideline_ranker import GuidelineRankSchema
+from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRankSchema
 from parlant.core.engines.compass.reviewer import LowEffortReviewSchema
 from parlant.core.tracer import Tracer
 from parlant.core.meter import Meter

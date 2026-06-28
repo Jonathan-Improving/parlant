@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import parlant.sdk as p
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.matching.guideline_recaller import GuidelineRecaller
 
 from tests.sdk.utils import Context, SDKTest
 

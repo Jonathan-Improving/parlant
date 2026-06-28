@@ -30,7 +30,7 @@ from typing import Optional
 from parlant.core.agents import AgentId, AgentStore
 from parlant.core.background_tasks import BackgroundTaskService
 from parlant.core.common import ItemNotFoundError, UniqueId, generate_id
-from parlant.core.engines.compass.guideline_matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.matching.guideline_recaller import GuidelineRecaller
 from parlant.core.entity_cq import EntityQueries
 from parlant.core.loggers import Logger
 from parlant.core.services.indexing.common import ProgressReport

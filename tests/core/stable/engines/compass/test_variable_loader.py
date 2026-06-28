@@ -41,7 +41,7 @@ from parlant.core.tools import ToolContext, ToolId, ToolResult
 from parlant.core.loggers import StdoutLogger
 from parlant.core.tracer import LocalTracer
 
-from tests.core.stable.engines.compass.guideline_matching.utils import create_engine_context
+from tests.core.stable.engines.compass.matching.utils import create_engine_context
 
 
 def _variable(
