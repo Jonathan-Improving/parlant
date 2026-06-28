@@ -126,14 +126,14 @@ class Matcher:
             self._tool_recaller.prepare(context),
             self._load_glossary(context),
         )
-        await self._select_tools(context)
+        await self._select_tools(context, log_delta_from_fill=False)
 
     async def update(self, context: EngineContext) -> None:
         """Refresh after a step: reevaluate guidelines gated on the tools that
         just ran, then re-select tools. Tool relevance depends on the unchanged
         conversation, so it isn't rescored."""
         await self._reevaluate(context)
-        await self._select_tools(context)
+        await self._select_tools(context, log_delta_from_fill=True)
 
     async def warm_up(self, context: EngineContext) -> None:
         """Warm only the matcher components that the current strategy can use."""
@@ -353,8 +353,7 @@ class Matcher:
 
     def _check_if_raises_effort(self, context: EngineContext, guideline: Guideline) -> bool:
         return (
-            guideline.effort is not None
-            and guideline.effort > context.state.dynamic_effort_level
+            guideline.effort is not None and guideline.effort > context.state.dynamic_effort_level
         )
 
     async def _load_strategy_choice_signals(
@@ -704,8 +703,116 @@ class Matcher:
 
     # --- tool selection ---
 
-    async def _select_tools(self, context: EngineContext) -> None:
+    async def _select_tools(
+        self,
+        context: EngineContext,
+        *,
+        log_delta_from_fill: bool,
+    ) -> None:
         await self._tool_recaller.select(context)
+
+        current_tool_ids = self._available_tool_ids(context)
+
+        if log_delta_from_fill:
+            added = current_tool_ids - context.state.fill_available_tool_ids
+            removed = context.state.fill_available_tool_ids - current_tool_ids
+            if added or removed:
+                self._log_available_tool_delta(context, added, removed)
+        else:
+            context.state.fill_available_tool_ids = current_tool_ids
+            self._log_available_tools(context)
+
+    def _available_tool_ids(self, context: EngineContext) -> set[ToolId]:
+        return {
+            tool_id
+            for tool in context.state.available_tools
+            if (tool_id := context.state.tool_ids_by_name.get(tool.name)) is not None
+        }
+
+    def _log_available_tool_delta(
+        self,
+        context: EngineContext,
+        added: set[ToolId],
+        removed: set[ToolId],
+    ) -> None:
+        tools_by_id = {
+            tool_id: tool
+            for tool in context.state.available_tools
+            if (tool_id := context.state.tool_ids_by_name.get(tool.name)) is not None
+        }
+
+        tools_log = StringIO()
+
+        if added:
+            tools_log.write("Added:\n")
+            for idx, tool_id in enumerate(sorted(added, key=lambda tid: tid.to_string()), start=1):
+                tool = tools_by_id.get(tool_id)
+                score = context.state.tool_relevance_scores.get(tool_id, 0.0)
+                tools_log.write(
+                    f"### +{idx} {tool.name if tool else tool_id.tool_name} "
+                    f"[Score: {score:.2f}]\n\n"
+                )
+                tools_log.write(f"    Tool ID: {tool_id.to_string()}\n")
+                if tool and tool.description:
+                    tools_log.write(f"    Description: {tool.description.strip()}\n")
+                tools_log.write("\n")
+
+        if removed:
+            tools_log.write("Removed:\n")
+            for idx, tool_id in enumerate(
+                sorted(removed, key=lambda tid: tid.to_string()), start=1
+            ):
+                tools_log.write(f"### -{idx} {tool_id.tool_name}\n\n")
+                tools_log.write(f"    Tool ID: {tool_id.to_string()}\n\n")
+
+        self._logger.debug(f"{self.__class__.__name__} tool recall:\n{tools_log.getvalue()}")
+
+    def _log_available_tools(self, context: EngineContext) -> None:
+        if not context.state.available_tools:
+            self._logger.debug(f"{self.__class__.__name__} tool recall:\n[None]")
+            return
+
+        matched_tool_names = {tool.name for tool in context.state.matched_tools}
+        session_guideline_ids = {guideline.id for guideline in context.state.session_guidelines}
+        session_tool_ids = {
+            tool_id
+            for guideline_id in session_guideline_ids
+            for tool_id, _ in context.state.tools_by_guideline.get(guideline_id, set())
+        }
+
+        tool_log_entries = []
+        for tool in context.state.available_tools:
+            tool_id = context.state.tool_ids_by_name.get(tool.name)
+            score = context.state.tool_relevance_scores.get(tool_id, 0.0) if tool_id else 0.0
+
+            if tool.name in matched_tool_names:
+                bucket_priority = 0
+                bucket = "Matched to turn"
+            elif tool_id in session_tool_ids:
+                bucket_priority = 1
+                bucket = "Matched to session"
+            else:
+                bucket_priority = 2
+                bucket = "Complementary"
+
+            tool_log_entries.append((bucket_priority, -score, tool.name, tool, tool_id, score, bucket))
+
+        tools_log = StringIO()
+        for idx, (_, _, _, tool, tool_id, score, bucket) in enumerate(
+            sorted(tool_log_entries),
+            start=1,
+        ):
+            tools_log.write(f"### {idx} {tool.name} [Score: {score:.2f} ({bucket})]\n\n")
+
+            if tool_id:
+                tools_log.write(f"    Tool ID: {tool_id.to_string()}\n")
+
+            if tool.description:
+                tools_log.write(f"    Description: {tool.description.strip()}\n")
+
+            tools_log.write("\n")
+
+        self._logger.debug(f"{self.__class__.__name__} available tools:\n{tools_log.getvalue()}")
 
     def _build_tool_query(self, context: EngineContext) -> str:
         return (

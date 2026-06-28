@@ -54,6 +54,8 @@ class ResponseState:
     # final tool catalog offered to the model, capped and emitted by name for cache stability
     available_tools: list[Tool] = field(default_factory=list)
     tool_ids_by_name: dict[str, ToolId] = field(default_factory=dict)  # to run a tool by its name
+    # initial tool catalog selected during fill(); update() logs only deltas from this baseline
+    fill_available_tool_ids: set[ToolId] = field(default_factory=set)
 
     # The agent's reasoning from each step of the response loop so far this turn,
     # in order. The loop appends to it after every step; the matching components

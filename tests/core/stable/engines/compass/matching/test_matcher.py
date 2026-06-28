@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import asyncio
 from unittest.mock import AsyncMock
 import pytest
@@ -40,6 +41,7 @@ from parlant.core.engines.compass.matcher import (
 )
 from parlant.core.engines.compass.response_state import EngineContext, ResponseState
 from parlant.core.sessions import EventSource
+from parlant.core.tools import Tool, ToolId, ToolOverlap
 
 from tests.core.stable.engines.compass.matching.utils import (
     create_engine_context,
@@ -69,8 +71,11 @@ class _FakeMatcherRegistry:
 
 
 class _FakeLogger:
+    def __init__(self) -> None:
+        self.debug_messages: list[str] = []
+
     def debug(self, *args, **kwargs):
-        pass
+        self.debug_messages.append(str(args[0]))
 
 
 def _make_warm_up_matcher() -> Matcher:
@@ -117,6 +122,19 @@ def _context_with_guidelines(*guidelines, effort: Effort) -> EngineContext:
     return context
 
 
+def _tool(name: str, description: str | None = None) -> Tool:
+    return Tool(
+        name=name,
+        creation_utc=datetime.now(timezone.utc),
+        description=description or f"{name} tool",
+        metadata={},
+        parameters={},
+        required=[],
+        consequential=False,
+        overlap=ToolOverlap.NONE,
+    )
+
+
 @pytest.mark.asyncio
 async def test_that_tool_recaller_prepare_runs_in_parallel_with_guideline_matching() -> None:
     matcher = object.__new__(Matcher)
@@ -146,19 +164,106 @@ async def test_that_tool_recaller_prepare_runs_in_parallel_with_guideline_matchi
     await fill_task
 
     matcher._tool_recaller.prepare.assert_awaited_once_with(context)
-    matcher._select_tools.assert_awaited_once_with(context)
+    matcher._select_tools.assert_awaited_once_with(context, log_delta_from_fill=False)
 
 
 @pytest.mark.asyncio
 async def test_that_select_tools_delegates_to_tool_recaller() -> None:
     matcher = object.__new__(Matcher)
+    matcher._logger = _FakeLogger()
     matcher._tool_recaller = AsyncMock()
     matcher._tool_recaller.select = AsyncMock()
     context = _context_with_guidelines(effort=Effort.MEDIUM)
 
-    await matcher._select_tools(context)
+    await matcher._select_tools(context, log_delta_from_fill=False)
 
     matcher._tool_recaller.select.assert_awaited_once_with(context)
+
+
+@pytest.mark.asyncio
+async def test_that_select_tools_logs_no_delta_when_update_keeps_fill_catalog() -> None:
+    logger = _FakeLogger()
+    matcher = object.__new__(Matcher)
+    matcher._logger = logger
+    matcher._tool_recaller = AsyncMock()
+    matcher._tool_recaller.select = AsyncMock()
+    context = _context_with_guidelines(effort=Effort.MEDIUM)
+    tool_id = ToolId("local", "lookup")
+    context.state.available_tools = [_tool("lookup")]
+    context.state.tool_ids_by_name = {"lookup": tool_id}
+    context.state.fill_available_tool_ids = {tool_id}
+
+    await matcher._select_tools(context, log_delta_from_fill=True)
+
+    assert logger.debug_messages == []
+
+
+@pytest.mark.asyncio
+async def test_that_select_tools_logs_only_delta_when_update_changes_fill_catalog() -> None:
+    logger = _FakeLogger()
+    matcher = object.__new__(Matcher)
+    matcher._logger = logger
+    matcher._tool_recaller = AsyncMock()
+    matcher._tool_recaller.select = AsyncMock()
+    context = _context_with_guidelines(effort=Effort.MEDIUM)
+    old_tool_id = ToolId("local", "old_lookup")
+    new_tool_id = ToolId("local", "new_lookup")
+    context.state.available_tools = [_tool("new_lookup", "New lookup tool.")]
+    context.state.tool_ids_by_name = {"new_lookup": new_tool_id}
+    context.state.tool_relevance_scores = {new_tool_id: 0.8}
+    context.state.fill_available_tool_ids = {old_tool_id}
+
+    await matcher._select_tools(context, log_delta_from_fill=True)
+
+    assert len(logger.debug_messages) == 1
+    assert "Matcher tool recall:" in logger.debug_messages[0]
+    assert "Added:" in logger.debug_messages[0]
+    assert "new_lookup [Score: 0.80]" in logger.debug_messages[0]
+    assert "Removed:" in logger.debug_messages[0]
+    assert "old_lookup" in logger.debug_messages[0]
+
+
+def test_that_available_tool_log_is_sorted_by_bucket_then_score() -> None:
+    logger = _FakeLogger()
+    matcher = object.__new__(Matcher)
+    matcher._logger = logger
+    turn_guideline = create_guideline("turn tool applies")
+    session_guideline = create_guideline("session tool applies")
+    turn_low_id = ToolId("local", "turn_low")
+    turn_high_id = ToolId("local", "turn_high")
+    session_id = ToolId("local", "session_tool")
+    complementary_id = ToolId("local", "complementary_tool")
+    context = _context_with_guidelines(turn_guideline, session_guideline, effort=Effort.MEDIUM)
+    context.state.available_tools = [
+        _tool("complementary_tool"),
+        _tool("session_tool"),
+        _tool("turn_low"),
+        _tool("turn_high"),
+    ]
+    context.state.matched_tools = [_tool("turn_low"), _tool("turn_high")]
+    context.state.session_guidelines = {session_guideline}
+    context.state.tools_by_guideline = {
+        session_guideline.id: {(session_id, _tool("session_tool"))}
+    }
+    context.state.tool_ids_by_name = {
+        "turn_low": turn_low_id,
+        "turn_high": turn_high_id,
+        "session_tool": session_id,
+        "complementary_tool": complementary_id,
+    }
+    context.state.tool_relevance_scores = {
+        turn_low_id: 0.2,
+        turn_high_id: 0.9,
+        session_id: 0.8,
+        complementary_id: 1.0,
+    }
+
+    matcher._log_available_tools(context)
+
+    log = logger.debug_messages[0]
+    assert log.index("### 1 turn_high") < log.index("### 2 turn_low")
+    assert log.index("### 2 turn_low") < log.index("### 3 session_tool")
+    assert log.index("### 3 session_tool") < log.index("### 4 complementary_tool")
 
 
 def test_that_distilled_actions_are_wrapped_as_policy_notes() -> None:
