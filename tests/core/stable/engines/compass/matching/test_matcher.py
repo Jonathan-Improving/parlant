@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import replace
+import asyncio
 from unittest.mock import AsyncMock
 import pytest
 
@@ -114,6 +115,50 @@ def _context_with_guidelines(*guidelines, effort: Effort) -> EngineContext:
         glossary_terms={create_term("known term", "already loaded")},
     )
     return context
+
+
+@pytest.mark.asyncio
+async def test_that_tool_recaller_prepare_runs_in_parallel_with_guideline_matching() -> None:
+    matcher = object.__new__(Matcher)
+    context = _context_with_guidelines(effort=Effort.MEDIUM)
+    match_started = asyncio.Event()
+    release_match = asyncio.Event()
+    tool_prepare_started = asyncio.Event()
+
+    async def match(_context: EngineContext) -> None:
+        match_started.set()
+        await release_match.wait()
+
+    async def prepare_tools(_context: EngineContext) -> None:
+        tool_prepare_started.set()
+
+    matcher._match = AsyncMock(side_effect=match)
+    matcher._tool_recaller = AsyncMock()
+    matcher._tool_recaller.prepare = AsyncMock(side_effect=prepare_tools)
+    matcher._load_glossary = AsyncMock()
+    matcher._select_tools = AsyncMock()
+
+    fill_task = asyncio.create_task(matcher.fill(context))
+    await match_started.wait()
+    await asyncio.wait_for(tool_prepare_started.wait(), timeout=1.0)
+
+    release_match.set()
+    await fill_task
+
+    matcher._tool_recaller.prepare.assert_awaited_once_with(context)
+    matcher._select_tools.assert_awaited_once_with(context)
+
+
+@pytest.mark.asyncio
+async def test_that_select_tools_delegates_to_tool_recaller() -> None:
+    matcher = object.__new__(Matcher)
+    matcher._tool_recaller = AsyncMock()
+    matcher._tool_recaller.select = AsyncMock()
+    context = _context_with_guidelines(effort=Effort.MEDIUM)
+
+    await matcher._select_tools(context)
+
+    matcher._tool_recaller.select.assert_awaited_once_with(context)
 
 
 def test_that_distilled_actions_are_wrapped_as_policy_notes() -> None:

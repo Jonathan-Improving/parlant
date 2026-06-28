@@ -18,7 +18,6 @@ from dataclasses import replace
 from enum import Enum, IntEnum, auto
 from io import StringIO
 from itertools import chain
-import traceback
 from typing import cast
 
 from parlant.core.agents import Effort
@@ -32,6 +31,7 @@ from parlant.core.engines.compass.matching.guideline_function_matcher import (
 from parlant.core.engines.compass.matching.guideline_distiller import GuidelineDistiller
 from parlant.core.engines.compass.matching.guideline_ranker import GuidelineRanker
 from parlant.core.engines.compass.matching.guideline_recaller import GuidelineRecaller
+from parlant.core.engines.compass.matching.tool_recaller import ToolRecaller
 from parlant.core.engines.compass.response_state import EngineContext
 from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.entity_cq import EntityCommands, EntityQueries
@@ -44,7 +44,7 @@ from parlant.core.relationships import (
 )
 from parlant.core.sessions import ToolEventData
 from parlant.core.tags import TagId
-from parlant.core.tools import Tool, ToolId, ToolRelevanceResult
+from parlant.core.tools import ToolId
 
 _GUIDELINE_IS_COMPLEX: dict[GuidelineId, bool] = {}
 _SESSION_GUIDELINE_IDS_METADATA_KEY = "compass.session_guideline_ids"
@@ -77,13 +77,13 @@ class Matcher:
     tools, and the offered tool catalog.
     """
 
-    _MAX_AVAILABLE_TOOLS = 16
     _MAX_GLOSSARY_TERMS = 30
 
     def __init__(
         self,
         logger: Logger,
         guideline_recaller: GuidelineRecaller,
+        tool_recaller: ToolRecaller,
         guideline_ranker: GuidelineRanker,
         guideline_distiller: GuidelineDistiller,
         guideline_function_matcher: GuidelineFunctionMatcher,
@@ -95,6 +95,7 @@ class Matcher:
     ) -> None:
         self._logger = logger
         self._guideline_recaller = guideline_recaller
+        self._tool_recaller = tool_recaller
         self._guideline_ranker = guideline_ranker
         self._guideline_distiller = guideline_distiller
         self._guideline_function_matcher = guideline_function_matcher
@@ -117,21 +118,20 @@ class Matcher:
         await self._load_session_guidelines(context)
 
     async def fill(self, context: EngineContext) -> None:
-        """Initial preparation: match all usable guidelines, rank the agent's tool
+        """Initial preparation: match all usable guidelines, score the agent's tool
         pool, and load the relevant glossary (all independent, so in parallel), then
         select the offered tools."""
-        await self._load_tools_by_guideline(context)
         await safe_gather(
             self._match(context),
-            self._rank_tool_pool(context),
+            self._tool_recaller.prepare(context),
             self._load_glossary(context),
         )
         await self._select_tools(context)
 
     async def update(self, context: EngineContext) -> None:
         """Refresh after a step: reevaluate guidelines gated on the tools that
-        just ran, then re-select tools. The tool pool ranking depends on the
-        (unchanged) conversation, so it isn't re-ranked."""
+        just ran, then re-select tools. Tool relevance depends on the unchanged
+        conversation, so it isn't rescored."""
         await self._reevaluate(context)
         await self._select_tools(context)
 
@@ -705,86 +705,7 @@ class Matcher:
     # --- tool selection ---
 
     async def _select_tools(self, context: EngineContext) -> None:
-        # Resolve the matched guidelines' tools, then fold them with the ranked
-        # pool into the offered catalog. Idempotent when nothing changed (so the
-        # rendered prompt stays byte-identical), and picks up any tools a
-        # reevaluated tool-enabled guideline brought in.
-        await self._resolve_matched_tools(context)
-        self._select_available_tools(context)
-
-    async def _resolve_matched_tools(self, context: EngineContext) -> None:
-        tool_ids = list(
-            dict.fromkeys(
-                tool_id
-                for tool_ids in context.state.tool_enabled_guideline_matches.values()
-                for tool_id in tool_ids
-            )
-        )
-        context.state.matched_tools = await self._resolve_tools_by_id(tool_ids)
-
-    async def _rank_tool_pool(self, context: EngineContext) -> None:
-        # Rank the agent's candidate tools against the agent description + the
-        # conversation, scoped per service. Each service ranks only its own tools;
-        # we merge the scored results across services.
-        candidate_ids = await self._agent_candidate_tool_ids(context)
-        # Map names back to ToolIds so a tool call (which carries only a name) can
-        # be routed to its service when run.
-        context.state.tool_ids_by_name = {tid.tool_name: tid for tid in candidate_ids}
-
-        if not candidate_ids:
-            context.state.agent_tool_pool = []
-            return
-
-        query = self._build_tool_query(context)
-
-        names_by_service: dict[str, list[str]] = defaultdict(list)
-        for tool_id in candidate_ids:
-            names_by_service[tool_id.service_name].append(tool_id.tool_name)
-
-        async def find_relevant_tools_for_service(
-            service_name: str,
-            names: Sequence[str],
-        ) -> Sequence[ToolRelevanceResult]:
-            try:
-                service = await self._entity_queries.read_tool_service(service_name)
-                return await service.find_relevant_tools(query, names, self._MAX_AVAILABLE_TOOLS)
-            except Exception as e:
-                self._logger.warning(
-                    f"Failed to rank tools for service {service_name}: {e!r}\n"
-                    f"{traceback.format_exc()}"
-                )
-                return []
-
-        results: list[ToolRelevanceResult] = list(
-            chain.from_iterable(
-                await safe_gather(
-                    *(
-                        find_relevant_tools_for_service(service_name, names)
-                        for service_name, names in names_by_service.items()
-                    )
-                )
-            )
-        )
-
-        results.sort(key=lambda r: r.score, reverse=True)
-        context.state.agent_tool_pool = [r.tool for r in results]
-
-    def _select_available_tools(self, context: EngineContext) -> None:
-        # Matched-turn tools are always included; fill up to _MAX_AVAILABLE_TOOLS
-        # with the most relevant general tools.
-        chosen: list[Tool] = list(context.state.matched_tools)
-        seen = {tool.name for tool in chosen}
-        for tool in context.state.agent_tool_pool:
-            if len(chosen) >= self._MAX_AVAILABLE_TOOLS:
-                break
-            if tool.name not in seen:
-                seen.add(tool.name)
-                chosen.append(tool)
-
-        # Emit by name so an unchanged selection is byte-identical turn to turn,
-        # keeping the cached tools prefix warm (selection uses scores; emission
-        # order is stable).
-        context.state.available_tools = sorted(chosen, key=lambda tool: tool.name)
+        await self._tool_recaller.select(context)
 
     def _build_tool_query(self, context: EngineContext) -> str:
         return (
@@ -820,41 +741,3 @@ class Matcher:
             lines.append("User: Hello")
 
         return lines
-
-    async def _agent_candidate_tool_ids(self, context: EngineContext) -> set[ToolId]:
-        guideline_ids = {g.id for g in context.state.usable_guidelines}
-        return {
-            association.tool_id
-            for association in await self._entity_queries.find_guideline_tool_associations()
-            if association.guideline_id in guideline_ids
-        }
-
-    async def _load_tools_by_guideline(self, context: EngineContext) -> None:
-        # Load the tools associated with each guideline into the state, so they can be
-        # looked up when a guideline matches. Loaded once here, not per response step.
-        context.state.tools_by_guideline = defaultdict(set)
-
-        guideline_tool_associations = await self._entity_queries.find_guideline_tool_associations()
-
-        for association in guideline_tool_associations:
-            if tool := await self._resolve_tool_by_id(association.tool_id):
-                context.state.tools_by_guideline[association.guideline_id].add(
-                    (association.tool_id, tool)
-                )
-
-    async def _resolve_tools_by_id(self, tool_ids: Iterable[ToolId]) -> list[Tool]:
-        tools: list[Tool] = []
-
-        for tool_id in tool_ids:
-            if tool := await self._resolve_tool_by_id(tool_id):
-                tools.append(tool)
-
-        return tools
-
-    async def _resolve_tool_by_id(self, tool_id: ToolId) -> Tool | None:
-        try:
-            service = await self._entity_queries.read_tool_service(tool_id.service_name)
-            return await service.read_tool(tool_id.tool_name)
-        except Exception as e:
-            self._logger.warning(f"Failed to resolve tool {tool_id.to_string()}: {e}")
-            return None

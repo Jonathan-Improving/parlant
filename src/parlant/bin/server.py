@@ -239,6 +239,7 @@ from parlant.core.engines.compass.matching.guideline_distiller import (
     HighEffortGuidelineDistillationSchema,
     LowEffortGuidelineDistillationSchema,
 )
+from parlant.core.engines.compass.matching.tool_recaller import ToolRecaller
 from parlant.core.engines.compass.reviewer import HighEffortReviewSchema, LowEffortReviewSchema
 from parlant.core.engines.compass.variable_loader import VariableLoader
 from parlant.core.guideline_tool_associations import (
@@ -714,6 +715,7 @@ async def setup_container() -> AsyncIterator[Container]:
     # Must be a singleton: retrain() (via TrainingService / SDK startup) and the
     # recall path (via the compass Matcher) have to share the same trained frame.
     _define_singleton(c, GuidelineRecaller, GuidelineRecaller)
+    _define_singleton(c, ToolRecaller, ToolRecaller)
 
     _define_singleton(c, GuidelineMatcher, GuidelineMatcher)
 

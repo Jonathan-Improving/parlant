@@ -14,13 +14,13 @@
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional
 
 import numpy as np
 import numpy.typing as npt
 
 from parlant.core.async_utils import safe_gather
 from parlant.core.engines.compass.response_state import EngineContext
+from parlant.core.entity_cq import EntityQueries
 from parlant.core.guidelines import GuidelineId
 from parlant.core.nlp.embedding import Embedder, EmbeddingCache
 from parlant.core.nlp.service import NLPService
@@ -36,9 +36,9 @@ class ToolRecaller:
 
     def __init__(
         self,
-        entity_queries: Any,
-        nlp_service: Optional[NLPService],
-        embedding_cache: Optional[EmbeddingCache],
+        entity_queries: EntityQueries,
+        nlp_service: NLPService,
+        embedding_cache: EmbeddingCache,
         max_tools: int = DEFAULT_MAX_TOOLS,
     ) -> None:
         self._entity_queries = entity_queries

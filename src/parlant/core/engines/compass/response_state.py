@@ -49,11 +49,9 @@ class ResponseState:
     tool_enabled_guideline_matches: dict[GuidelineMatch, list[ToolId]] = field(default_factory=dict)
     # tools the matched guidelines enabled this turn (described in the prompt)
     matched_tools: list[Tool] = field(default_factory=list)
-    # all the agent's candidate tools, ranked by relevance to the conversation
-    agent_tool_pool: list[Tool] = field(default_factory=list)
     # per-turn relevance scores for candidate tools, computed before final selection
     tool_relevance_scores: dict[ToolId, float] = field(default_factory=dict)
-    # final catalog offered to the model (matched_tools ∪ top of the pool, capped, by name)
+    # final tool catalog offered to the model, capped and emitted by name for cache stability
     available_tools: list[Tool] = field(default_factory=list)
     tool_ids_by_name: dict[str, ToolId] = field(default_factory=dict)  # to run a tool by its name
 
