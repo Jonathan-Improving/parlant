@@ -196,6 +196,7 @@ class ValkeyVectorDatabase(VectorDatabase):
                     use_tls=self._tls,
                     request_timeout=self._request_timeout,
                     credentials=creds,
+                    client_info_tag="parlant",
                 )
                 self._client = await GlideClusterClient.create(config)
             else:
@@ -204,6 +205,7 @@ class ValkeyVectorDatabase(VectorDatabase):
                     use_tls=self._tls,
                     request_timeout=self._request_timeout,
                     credentials=creds,
+                    client_info_tag="parlant",
                 )
                 self._client = await GlideClient.create(config_standalone)
         except (GlideConnectionError, GlideTimeoutError, ClosingError) as e:
